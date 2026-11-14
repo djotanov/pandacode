@@ -3,6 +3,7 @@
 //! another of the user's computers. Nothing touches the network until the user signs in.
 mod auth;
 mod bench;
+pub(crate) mod browse;
 pub(crate) mod catalog;
 mod client;
 mod config;

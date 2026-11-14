@@ -34,6 +34,8 @@ const sampleTestOutput = 'PASS src/components/search.test.ts\n  ✓ filters resu
 function encodeTool(tool: ToolActivity): string { return JSON.stringify({ type: 'tool_activity', version: 1, ...tool }); }
 let projects: Project[] = [{ id: 'project-1', name: 'orbit', path: '/Users/you/Projects/orbit' }, { id: 'project-2', name: 'pandacode', path: '/Users/you/Projects/pandacode' }];
 const previewExplorer = createPreviewFileExplorer();
+/** Computers whose projects are shown here (`remote_browse`). */
+const browsedComputers = new Set<string>();
 let sessions: Session[] = [
   { id: 'session-1', projectId: 'project-1', title: 'Make search feel instant', provider: 'claude', model: 'sonnet', mode: 'ask', status: 'idle', createdAt: now - 420000, updatedAt: now, archived: false, worktreePath: null, resumeId: 'preview-session', lastResponseAt: now - 300000 },
   { id: 'session-2', projectId: 'project-1', title: 'Refine the navigation', provider: 'codex', model: '', mode: 'ask', status: 'idle', createdAt: now - 8200000, updatedAt: now - 8000000, archived: false, worktreePath: null, resumeId: null, lastResponseAt: null },
@@ -1585,6 +1587,41 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
     await invoke('send_message', { sessionId: s.id, text: args.prompt, imageIds: args.imageIds ?? [] });
     emit('sessions-changed', {});
     return (w.__remoteStartBusy ? { sessionId: s.id, note: w.__remoteStartBusy } : { sessionId: s.id }) as T;
+  }
+  if (command === 'remote_browsed') return [...browsedComputers] as T;
+  if (command === 'remote_browse') {
+    // Another computer's projects and tasks shown here (remote/browse.rs). Tests: `__remoteBrowses`
+    // records each call, `__remoteBrowseFail` is an error text for the next show.
+    const w = window as any, deviceId = String(args.deviceId);
+    (w.__remoteBrowses ??= []).push(args);
+    const shownHere = (projectId: string) => projects.find(item => item.id === projectId)?.remoteDevice?.id === deviceId;
+    if (!args.show) {
+      browsedComputers.delete(deviceId);
+      sessions = sessions.filter(task => !shownHere(task.projectId));
+      projects = projects.filter(item => item.remoteDevice?.id !== deviceId);
+      emit('sessions-changed', {});
+      return { projects: 0, tasks: 0 } as T;
+    }
+    if (w.__remoteBrowseFail) { const failure = w.__remoteBrowseFail; w.__remoteBrowseFail = undefined; throw new Error(failure); }
+    const targets = await invokeRemote<{ deviceId: string; name: string; online: boolean }[]>('remote_targets', {}, emit);
+    const target = targets.find(item => item.deviceId === deviceId);
+    if (!target) throw new Error('That computer is offline.');
+    browsedComputers.add(deviceId);
+    const remoteDevice = { id: deviceId, name: target.name };
+    for (const [key, name] of [['atlas', 'atlas'], ['notes', 'field-notes']]) {
+      const id = `remote-${deviceId}-${key}`;
+      if (!projects.some(item => item.id === id)) projects.push({ id, name, path: `pandacode-remote://${deviceId}/${key}`, remoteDevice });
+    }
+    const taskId = `remote-${deviceId}-task-1`, at = Date.now() - 3_600_000;
+    if (!sessions.some(task => task.id === taskId)) {
+      sessions.push({ id: taskId, projectId: `remote-${deviceId}-atlas`, title: 'Fix the flaky upload test', provider: 'github-copilot', model: 'default', mode: 'ask', status: 'idle', createdAt: at, updatedAt: at, lastResponseAt: at, lastPromptAt: at, archived: false, resumeId: null, worktreePath: null, reasoningEffort: null, contextUsage: null, taskStage: 'review', taskDescription: '', completedAt: null, pinned: false, sidebarOrder: null, draft: false, remoteDevice } as Session);
+      messages[taskId] = [
+        { id: 1, sessionId: taskId, role: 'user', content: 'The upload test fails about one run in five. Find out why.', createdAt: at },
+        { id: 2, sessionId: taskId, role: 'assistant', content: `The test raced the upload's progress callback. It now waits for the final event, and passed 50 runs in a row on ${target.name}.`, createdAt: at + 60_000 },
+      ];
+    }
+    emit('sessions-changed', {});
+    return { projects: projects.filter(item => item.remoteDevice?.id === deviceId).length, tasks: sessions.filter(task => shownHere(task.projectId)).length } as T;
   }
   if (command.startsWith('remote_') && command !== 'remote_team' && command !== 'remote_worker_messages') return invokeRemote<T>(command, args, emit);
   if (command.startsWith('orchestration_')) installMachineChildren();
