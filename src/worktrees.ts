@@ -84,7 +84,7 @@ export function createWorktrees(host: WorktreeHost) {
   }
 
   async function showMenu(anchor: HTMLElement): Promise<void> {
-    const session = host.session(); if (!session || session.remoteDevice) return;
+    const session = host.session(); if (!session || session.remoteDevice || host.project()?.remoteDevice) return;
     const project = host.project(), git = host.git(), missing = worktreeMissing(session, host.gitError());
     const path = session.worktreePath ?? project?.path ?? '';
     const branch = missing ? session.worktreeBranch || 'unknown branch' : git?.branch || session.worktreeBranch || 'Detached HEAD';

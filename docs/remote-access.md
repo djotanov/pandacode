@@ -49,6 +49,49 @@ while H is still starting it) and `remote_synced_id` (the last of H's message id
   agent) goes through `Store::workspace_root`, which refuses a mirror with
   `This task runs on <name>.` and never touches the local disk.
 
+## Remote projects
+
+A computer can also be *shown* here: its projects appear in this computer's sidebar and
+project menus, its tasks are listed as mirrors, and a New task in one of its projects starts
+there (`src-tauri/src/remote/browse.rs`). Open project lists the account's other computers with
+Show projects / Stop showing; a shown project's menu offers Stop showing <computer>. The list
+of shown computers is `browsed` in `remote.json`.
+
+- **Rows (schema version 38).** Each project of a shown computer is a `projects` row with
+  `remote_device` (the computer's device id) and `remote_project` (its project id there), unique
+  per pair, and a placeholder `path` (`pandacode-remote://<device>/<project>`) that is never a
+  folder here. `Store::projects()` (this computer's) leaves them out and `Store::project()`
+  refuses them (`<name> is on <computer>.`), so nothing that reads a folder ever gets one;
+  `Store::all_projects()` (the `list_projects` command) and `Store::project_entry()` include
+  them. Hosting is unaffected: a host's `tasks.list` and `task.start` see only its own projects.
+- **Listing.** Showing a computer calls its `tasks.list` (its 200 most recent tasks, so a busy computer never crowds this one's own out of the sidebar's 500) at once, and again beside
+  each subscribe round (at most every 30 s per computer) while it is online. `browse::apply`
+  makes or renames its projects (bot workspaces and chats are left out) and makes a mirror for
+  each task not yet mirrored here (matched by `(remote_device, remote_session)`, so a task this
+  computer started keeps its row); a task already settled there, or a harness or mode this build doesn't know, leaves the task out.
+  A project missing from a reply goes with its copies, unless the reply was near the frame budget
+  and may have been cut. A task the host reports `missing` in a subscribe is removed here when it
+  is in a remote project (other mirrors end as before).
+- **Deferred copies.** Mirrors made by a listing have `sessions.remote_deferred = 1`: their
+  status, cards and live events follow the host as usual, but no messages are copied (not in a
+  subscribe catch-up, a reconnect's pipelined pages, or a run end), so showing a computer with
+  hundreds of tasks copies no histories. Opening the thread (`get_messages` without `beforeId`)
+  clears the flag and syncs it (newest page first, then the backfill). Until then a listing
+  keeps its title and stage in step with the host.
+- **Starting.** `remote_start_task` for a remote project sends `projectId` (the host's id)
+  instead of `repo`, so no local checkout or GitHub origin is needed, and a project of another
+  computer is refused. The window skips `remote_repo_check` and its "GitHub is behind" dialog.
+  On the host, a `projectId` start whose folder has no `.git` (here or above) runs in place,
+  never in a worktree, while no other agent works there; a checkout without `origin` fetches
+  nothing and uses its own branches (the viewer's branch when it has it, else the one checked
+  out), with worktrees made from that local branch. Checkouts with `origin` work as before.
+- **Window.** A task in a remote project uses that computer as its Run on choice, fixed
+  (`projectRemote`/`runChoice` in `main.ts`; the chip says "This project is on <computer>, so its
+  tasks run there."), so the model picker, offline note and start progress are the mirror ones.
+  The inspector shows "Runs on <computer>" without any git or file call, the branch menu is not
+  offered, and menus show the project as "On <computer>". A send that would run such a task
+  here (a board task, say) is refused.
+
 ## Accounts
 
 Sign in with GitHub using the OAuth **device flow** (no client secret anywhere):
@@ -1619,10 +1662,13 @@ GitHub CLI work while the inspected task state is unchanged.
 | `list_providers` | `{ force?, deviceId? }` | as without `deviceId`, from that host (see Model lists) |
 | `list_provider_models` | `{ provider, force?, deviceId? }` | as without `deviceId`, from that host |
 | `remote_start_task` | `{ deviceId, projectId, prompt, provider, model, mode?, effort?, worktree?, branch?, sessionId? }` | the mirror `Session` plus `sessionId`. `branch` defaults to the checkout's. An empty New task draft without its own worktree passed as `sessionId` becomes the mirror; otherwise a new task is made. On failure nothing is left: a new row is deleted, a draft stays a draft. With `startId`, a timeout or a dropped socket keeps the row and returns it (see Starting a task). |
+| `remote_browse` | `{ deviceId, show }` | `{ projects, tasks }` now shown from that computer. `show: true` lists it at once (an offline or non-hosting computer is refused) and keeps it shown; `false` removes its remote projects and their copies. See Remote projects. |
+| `remote_browsed` | | `[deviceId]`: the computers shown here |
 | `remote_cancel_start` | `{ sessionId }` (the local row) | `{ cancelled }`. Cancels a start that has no host task yet and puts the row back (also when the host can't be reached); `cancelled: false` when the host had already made the task, which then runs as a mirror. |
 
-Window events: `remote://status` (status), `remote://presence` (devices), and for mirrors the
-ordinary `agent-event` and `sessions-changed`.
+Window events: `remote://status` (status), `remote://presence` (devices), for mirrors the
+ordinary `agent-event` and `sessions-changed`, and `projects-changed` when a shown computer's
+projects change.
 
 The agent-event hook in `lib.rs` clones and allocates nothing while hosting is off or nobody
 follows (or followed, since this launch) that task.
@@ -1630,4 +1676,6 @@ follows (or followed, since this launch) that task.
 ## Privacy
 
 Listed in the README privacy table: remote access contacts GitHub (sign-in only) and the relay
-(while signed in). Task content crosses the relay only encrypted end to end.
+(while signed in). Task content crosses the relay only encrypted end to end. Showing another computer's
+projects adds no destination: its task list is asked over the same relay (at most every 30 s
+while it is online), and its threads' messages are copied only when you open them.

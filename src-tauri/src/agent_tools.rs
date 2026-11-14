@@ -509,7 +509,8 @@ fn project_page(state: &AppState) -> Result<Value> {
     let store = state.store.lock().map_err(|e| e.to_string())?;
     let mut query = store
         .db
-        .prepare("SELECT id,substr(name,1,200) FROM projects ORDER BY name,id LIMIT 101")
+        // This computer's projects: another computer's (remote/browse.rs) can't take a task here.
+        .prepare("SELECT id,substr(name,1,200) FROM projects WHERE remote_device IS NULL ORDER BY name,id LIMIT 101")
         .map_err(|e| e.to_string())?;
     let rows = query
         .query_map([], |row| {

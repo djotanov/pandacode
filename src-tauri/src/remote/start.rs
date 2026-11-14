@@ -576,8 +576,62 @@ fn restore_checkout(root: &Path, trust: workspace::Trust) -> Result<()> {
 }
 
 fn remote_worktree(root: &Path, branch: &str, trust: workspace::Trust) -> Result<workspace::Worktree> {
+    worktree_from(root, &format!("origin/{branch}"), trust)
+}
+
+/// A `pandacode/remote-…` worktree made from `start` (a ref).
+fn worktree_from(root: &Path, start: &str, trust: workspace::Trust) -> Result<workspace::Worktree> {
     let name = format!("pandacode/remote-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
-    workspace::create_worktree_for(root, &name, Some(&format!("origin/{branch}")), false, trust)
+    workspace::create_worktree_for(root, &name, Some(start), false, trust)
+}
+
+/// Whether the checkout has an `origin` remote to fetch from.
+fn has_origin(root: &Path, trust: workspace::Trust) -> bool {
+    git_as(root, &["remote", "get-url", "origin"], GIT, trust).is_ok()
+}
+
+/// The branch a start without `origin` uses: the viewer's when this checkout has it, else
+/// the one checked out. Pure, so the choice is tested without Git.
+pub(crate) fn local_branch(wanted: Option<&str>, has: impl Fn(&str) -> bool, current: &str) -> Option<String> {
+    wanted.filter(|branch| has(branch)).map(str::to_owned).or_else(|| Some(current.to_owned()).filter(|branch| !branch.is_empty()))
+}
+
+/// Whether `root` is inside a Git checkout (it or a folder above it has `.git`), read from
+/// the disk alone, so a plain folder costs no Git process.
+pub(crate) fn inside_repository(root: &Path) -> bool {
+    root.ancestors().any(|folder| folder.join(".git").exists())
+}
+
+/// [`prepare`] for a project named by id whose folder is not a Git repository: it runs in
+/// place, while no other agent works there, and never in a worktree.
+fn prepare_outside_git(state: &AppState, project: &Project, worktree: bool) -> Result<Prepared> {
+    let host = super::config::device_name();
+    if worktree {
+        return Err(format!("{} on {host} is not a Git repository, so it can't have a worktree. Start the task without one.", project.name));
+    }
+    match reserve_in_place(&project.id, || busy_in_place(state, &project.id))? {
+        Some(reserved) => Ok((String::new(), None, None, Some(reserved))),
+        None => Err(in_place_refusal(&host, &project.name, "", "", false, true).unwrap_or_default()),
+    }
+}
+
+/// [`prepare`] for a project named by id whose checkout has no `origin` (a remote project
+/// shown on another computer, `browse.rs`): nothing is fetched, and the checkout's own
+/// branches are used.
+fn prepare_without_origin(state: &AppState, project: &Project, root: &Path, worktree: bool, wanted: Option<&str>, trust: workspace::Trust) -> Result<Prepared> {
+    let host = super::config::device_name();
+    let current = git_as(root, &["symbolic-ref", "--quiet", "--short", "HEAD"], GIT, trust).unwrap_or_default();
+    let has = |branch: &str| valid_branch(branch).is_ok() && git_as(root, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")], GIT, trust).is_ok();
+    let branch = local_branch(wanted, has, &current).ok_or_else(|| format!("{} on {host} has no branch checked out.", project.name))?;
+    if worktree {
+        return Ok((branch.clone(), Some(worktree_from(root, &branch, trust)?), None, None));
+    }
+    let reserved = reserve_in_place(&project.id, || busy_in_place(state, &project.id))?;
+    if let Some(reason) = ready_in_place(root, &project.name, &branch, reserved.is_none(), trust)? {
+        let made = worktree_from(root, &branch, trust)?;
+        return Ok((branch, Some(made), Some(worktree_note(&reason)), None));
+    }
+    Ok((branch, None, None, reserved))
 }
 
 /// A worktree for a task on a `--no-checkout` clone, made while the clone's own working tree
@@ -655,7 +709,14 @@ fn prepare(state: &AppState, project: &Project, cloned: bool, worktree: bool, wa
     check(cancel)?;
     progress.report("preparing", None, None);
     let root = PathBuf::from(&project.path);
+    // Only a project named by id can lack Git or origin: a repo is found by it, and a clone has it.
+    if !cloned && !inside_repository(&root) {
+        return prepare_outside_git(state, project, worktree);
+    }
     workspace::refuse_untrusted_programs_for(&root, trust, "start a task")?;
+    if !cloned && !has_origin(&root, trust) {
+        return prepare_without_origin(state, project, &root, worktree, wanted, trust);
+    }
     let branch = pick_branch_as(&root, wanted, !cloned, trust)?;
     check(cancel)?;
     let made = match (worktree, cloned) {
@@ -829,7 +890,28 @@ mod tests {
     }
 
     fn project(id: &str) -> Project {
-        Project { id: id.into(), name: id.into(), path: format!("/p/{id}"), added_order: 0 }
+        Project { id: id.into(), name: id.into(), path: format!("/p/{id}"), added_order: 0, remote_device: None, remote_project: None }
+    }
+
+    #[test]
+    fn a_start_without_origin_uses_the_viewers_branch_only_when_it_is_here() {
+        let has = |branch: &str| branch == "main" || branch == "feature";
+        assert_eq!(local_branch(Some("feature"), has, "main"), Some("feature".into()));
+        assert_eq!(local_branch(Some("elsewhere"), has, "main"), Some("main".into()));
+        assert_eq!(local_branch(None, has, "main"), Some("main".into()));
+        assert_eq!(local_branch(None, has, ""), None, "a detached HEAD names no branch");
+    }
+
+    #[test]
+    fn a_plain_folder_is_not_a_repository_but_a_folder_inside_one_is() {
+        let root = std::env::temp_dir().join(format!("pandacode-repo-{}", uuid::Uuid::new_v4().simple()));
+        let inner = root.join("app/src");
+        std::fs::create_dir_all(&inner).unwrap();
+        assert!(!inside_repository(&inner));
+        std::fs::create_dir(root.join(".git")).unwrap();
+        assert!(inside_repository(&inner));
+        assert!(inside_repository(&root));
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
@@ -988,7 +1070,7 @@ mod tests {
         std::fs::create_dir_all(&sub).unwrap();
         let missing = base.join("missing");
         let folders = [&main, &linked, &included, &bare, &sub, &missing];
-        let projects: Vec<Project> = folders.iter().enumerate().map(|(n, path)| Project { id: n.to_string(), name: n.to_string(), path: path.to_string_lossy().into_owned(), added_order: n as i64 }).collect();
+        let projects: Vec<Project> = folders.iter().enumerate().map(|(n, path)| Project { id: n.to_string(), name: n.to_string(), path: path.to_string_lossy().into_owned(), added_order: n as i64 , remote_device: None, remote_project: None }).collect();
         assert_eq!(config_path(&main).as_deref(), Some(main.join(".git/config")).as_deref());
         assert!(config_path(&linked).is_some_and(|path| path == main.join(".git").join("config") || path.canonicalize().ok() == main.join(".git/config").canonicalize().ok()));
         assert_eq!(config_path(&sub), None);

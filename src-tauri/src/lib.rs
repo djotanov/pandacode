@@ -773,7 +773,8 @@ async fn delete_session_with_attachment_cleanup(
 
 #[tauri::command]
 async fn list_projects(state: State<'_, AppState>) -> Result<Vec<Project>> {
-    state.store.lock().map_err(|e| e.to_string())?.projects()
+    // Remote projects too (another computer's, `remote/browse.rs`): the sidebar lists them.
+    state.store.lock().map_err(|e| e.to_string())?.all_projects()
 }
 #[tauri::command]
 async fn add_project(state: State<'_, AppState>, path: String) -> Result<Project> {
@@ -1101,15 +1102,21 @@ async fn update_session(
 }
 #[tauri::command]
 async fn get_messages(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     session_id: String,
     before_id: Option<i64>,
 ) -> Result<MessagePage> {
-    state
+    let page = state
         .store
         .lock()
         .map_err(|e| e.to_string())?
-        .message_page(&session_id, before_id)
+        .message_page(&session_id, before_id)?;
+    // A remote task shown but never opened copies its messages now (`remote/browse.rs`).
+    if before_id.is_none() {
+        remote::browse::opened(&app, &session_id);
+    }
+    Ok(page)
 }
 
 #[tauri::command]
@@ -4633,6 +4640,8 @@ pub fn run() {
                 cloud_agents::tasks::cloud_agent_action,
                 cloud_agents::tasks::cloud_agent_set_claude_token,
                 remote::mirror::remote_repo_check,
+                remote::browse::remote_browse,
+                remote::browse::remote_browsed,
                 provider_settings::provider_configuration,
                 connections::connections_list,
                 connections::connection_save,
