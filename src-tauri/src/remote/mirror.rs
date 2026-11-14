@@ -1806,6 +1806,11 @@ pub(crate) async fn commit(app: &tauri::AppHandle, mut request: Launch) -> Resul
             (StartAt::Repo(repo.ok_or(NO_REPO)?), wanted.or_else(|| Some(current).filter(|b| !b.is_empty())))
         }
     };
+    // A remote project's folder needs a host that keeps the task there; an older one is refused
+    // before anything is made, rather than starting it in a worktree unasked.
+    if matches!(at, StartAt::Project(_)) && !request.worktree {
+        super::browse::require_project_checkout(app, &device_id).await?;
+    }
     // Images go first, before any row exists: a failed upload leaves the New task as it was.
     let image_ids = super::images::send(app, &device_id, &request.image_ids).await?;
     let cancel = Arc::new(Notify::new());
@@ -1860,7 +1865,13 @@ pub(super) fn start_body(request: Launch, at: &StartAt, branch: Option<&str>, st
     let mut body = json!({"branch": branch, "worktree": worktree, "prompt": prompt, "provider": provider, "model": model, "mode": mode, "effort": effort, "startId": start_id, "imageIds": image_ids});
     match at {
         StartAt::Repo(repo) => body["repo"] = json!(repo),
-        StartAt::Project(id) => body["projectId"] = json!(id),
+        StartAt::Project(id) => {
+            body["projectId"] = json!(id);
+            // A remote project's own folder, as it is, like a local task (hosts before it ignore this).
+            if !worktree {
+                body["checkout"] = json!("current");
+            }
+        }
     }
     body
 }
@@ -2595,6 +2606,12 @@ mod tests {
         assert_eq!((by_repo["repo"].as_str(), by_repo.get("projectId")), (Some("orbit-labs/orbit"), None));
         let by_project = start_body(launch(), &StartAt::Project("p1".into()), None, Some("s1"), &[]);
         assert_eq!((by_project.get("repo"), by_project["projectId"].as_str()), (None, Some("p1")));
+        // In the project folder, as it is; a worktree start leaves the folder alone.
+        assert_eq!(by_project["checkout"], "current");
+        assert!(super::super::start::parse(&by_project).unwrap().current_checkout);
+        let in_worktree = start_body(Launch { worktree: true, ..launch() }, &StartAt::Project("p1".into()), None, None, &[]);
+        assert!(in_worktree.get("checkout").is_none());
+        assert!(by_repo.get("checkout").is_none(), "a repository start keeps the host's checks");
         // The host takes exactly one of them.
         assert!(super::super::start::parse(&by_project).is_ok());
         assert!(super::super::start::parse(&by_repo).is_ok());

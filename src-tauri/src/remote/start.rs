@@ -84,6 +84,10 @@ pub(crate) struct Start {
     pub target: Target,
     pub branch: Option<String>,
     pub worktree: bool,
+    /// `checkout: "current"` with a `projectId`: run in the project's own folder as it is (its
+    /// branch, its changes), like a task started on this computer. The viewer chose that folder
+    /// (a remote project, `browse.rs`), so nothing is fetched, switched or moved to a worktree.
+    pub current_checkout: bool,
     pub prompt: String,
     pub provider: String,
     pub model: String,
@@ -119,11 +123,17 @@ pub(crate) fn parse(params: &Value) -> Result<Start> {
     if let Some(branch) = &branch {
         valid_branch(branch)?;
     }
+    let current_checkout = match params.get("checkout").filter(|value| !value.is_null()) {
+        None => false,
+        Some(value) if value == "current" => matches!(target, Target::ProjectId(_)),
+        Some(_) => return Err("Invalid checkout.".into()),
+    };
     Ok(Start {
         start_id: name_param(params, "startId")?,
         target,
         branch,
         worktree: params["worktree"].as_bool().unwrap_or(false),
+        current_checkout,
         prompt: text_param(params, "prompt")?,
         provider: name_param(params, "provider")?.ok_or("Missing provider.")?,
         model: name_param(params, "model")?.ok_or("Missing model.")?,
@@ -602,6 +612,20 @@ pub(crate) fn inside_repository(root: &Path) -> bool {
     root.ancestors().any(|folder| folder.join(".git").exists())
 }
 
+/// A start the viewer asked to run in the project's folder as it is (`checkout: "current"`):
+/// nothing is fetched or switched, its changes stay, and another agent working there doesn't
+/// move it to a worktree, as for a task started on this computer. The branch is the one checked
+/// out ("" outside Git or on a detached HEAD).
+fn prepare_current(project: &Project, trust: workspace::Trust) -> Result<Prepared> {
+    let root = PathBuf::from(&project.path);
+    if !inside_repository(&root) {
+        return Ok((String::new(), None, None, None));
+    }
+    workspace::refuse_untrusted_programs_for(&root, trust, "start a task")?;
+    let branch = git_as(&root, &["symbolic-ref", "--quiet", "--short", "HEAD"], GIT, trust).unwrap_or_default();
+    Ok((branch, None, None, None))
+}
+
 /// [`prepare`] for a project named by id whose folder is not a Git repository: it runs in
 /// place, while no other agent works there, and never in a worktree.
 fn prepare_outside_git(state: &AppState, project: &Project, worktree: bool) -> Result<Prepared> {
@@ -805,11 +829,15 @@ async fn start_claimed(app: &tauri::AppHandle, from: &str, start: Start, progres
     let trust = workspace::Trust::phone(start.full_access.unwrap_or_else(|| super::remote(app).lock().settings.remote_full_access));
     let handle = app.clone();
     let (target, wanted, worktree, reporter, flag) = (start.target.clone(), start.branch.clone(), start.worktree, progress.clone(), cancel.clone());
+    let current = start.current_checkout && !start.worktree;
     let (project, (branch, made, mut note, reserved)) = tauri::async_runtime::spawn_blocking(move || -> Result<(Project, Prepared)> {
         let state = handle.state::<AppState>();
         // A worktree start never uses the clone's own checkout, so a fresh clone defers it.
         let (project, cloned) = project_for(&state, &target, &reporter, worktree, &flag, trust)?;
-        let prepared = prepare(&state, &project, cloned, worktree, wanted.as_deref(), &reporter, &flag, trust);
+        let prepared = if current && !cloned {
+            reporter.report("preparing", None, None);
+            prepare_current(&project, trust)
+        } else { prepare(&state, &project, cloned, worktree, wanted.as_deref(), &reporter, &flag, trust) };
         if cloned && worktree && prepared.is_err() {
             let _ = restore_checkout(Path::new(&project.path), trust);
         }
@@ -900,6 +928,44 @@ mod tests {
         assert_eq!(local_branch(Some("elsewhere"), has, "main"), Some("main".into()));
         assert_eq!(local_branch(None, has, "main"), Some("main".into()));
         assert_eq!(local_branch(None, has, ""), None, "a detached HEAD names no branch");
+    }
+
+    #[test]
+    fn current_checkout_is_only_for_a_project_named_by_id() {
+        let start = |extra: Value| {
+            let mut params = json!({"prompt": "p", "provider": "claude", "model": "default", "worktree": false});
+            for (key, value) in extra.as_object().unwrap() {
+                params[key] = value.clone();
+            }
+            parse(&params)
+        };
+        assert!(start(json!({"projectId": "p1", "checkout": "current"})).unwrap().current_checkout);
+        assert!(!start(json!({"projectId": "p1"})).unwrap().current_checkout, "older viewers keep the safe checks");
+        assert!(!start(json!({"repo": "orbit-labs/orbit", "checkout": "current"})).unwrap().current_checkout, "a repository's checkout is never taken as it is");
+        assert!(start(json!({"projectId": "p1", "checkout": "elsewhere"})).is_err());
+    }
+
+    #[test]
+    fn the_current_checkout_runs_as_it_is_on_its_own_branch_with_its_changes() {
+        let root = std::env::temp_dir().join(format!("pandacode-current-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&root).unwrap();
+        let run = |args: &[&str]| assert!(std::process::Command::new("git").args(args).current_dir(&root).output().unwrap().status.success(), "git {args:?}");
+        run(&["init", "-q", "-b", "main"]);
+        run(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "first"]);
+        run(&["switch", "-q", "-c", "feature"]);
+        std::fs::write(root.join("work.txt"), "uncommitted").unwrap();
+        let project = Project { id: "p".into(), name: "p".into(), path: root.to_string_lossy().into_owned(), added_order: 0, remote_device: None, remote_project: None };
+        let (branch, made, note, reserved) = prepare_current(&project, workspace::Trust::Desktop).unwrap();
+        assert_eq!(branch, "feature", "no switch to the default branch");
+        assert!(made.is_none() && note.is_none() && reserved.is_none(), "no worktree, however dirty");
+        assert!(root.join("work.txt").exists());
+        // A plain folder runs as it is too.
+        let plain = std::env::temp_dir().join(format!("pandacode-plain-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&plain).unwrap();
+        let folder = Project { path: plain.to_string_lossy().into_owned(), ..project };
+        assert_eq!(prepare_current(&folder, workspace::Trust::Desktop).unwrap().0, "");
+        std::fs::remove_dir_all(&root).unwrap();
+        std::fs::remove_dir_all(&plain).unwrap();
     }
 
     #[test]

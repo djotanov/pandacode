@@ -1565,6 +1565,8 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
     const targets = await invokeRemote<{ deviceId: string; name: string; online: boolean }[]>('remote_targets', {}, emit);
     const target = targets.find(item => item.deviceId === args.deviceId && item.online);
     if (!target) throw new Error('That computer is offline.');
+    // `__remoteOlderHost`: the host lacks `projectCheckout`, so a start in a remote project's folder is refused (remote/browse.rs).
+    if ((window as any).__remoteOlderHost && projects.find(item => item.id === args.projectId)?.remoteDevice && !args.worktree) throw new Error(`${target.name} runs an older PandaCode, which would start this task in a new worktree instead of the project folder. Update PandaCode on ${target.name}, or choose Runs in → New worktree.`);
     ((window as any).__remoteStarts ??= []).push(args);
     // The host's stages (finding, downloading…), shown by src/remote-progress.ts; may fail on request.
     await previewRemoteStart({ ...args, repo: previewGithub.status(args.projectId).repo?.nameWithOwner }, emit);

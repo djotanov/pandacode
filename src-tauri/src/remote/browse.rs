@@ -174,6 +174,49 @@ fn adopt(store: &Store, device: &str, session: &str, project: &str, title: &str,
     made.map(drop)
 }
 
+/// How long a computer's answer to whether it takes `checkout: "current"` is kept.
+const HELLO_FOR: Duration = Duration::from_secs(10 * 60);
+
+/// Whether a `host.hello` reply says the host runs a task in a project's folder as it is
+/// (`projectCheckout`). A host too old to answer `host.hello` at all does not.
+pub(crate) fn takes_project_checkout(hello: &Result<Value>) -> bool {
+    hello.as_ref().is_ok_and(|reply| reply["features"].as_array().is_some_and(|features| features.iter().any(|feature| feature == super::methods::PROJECT_CHECKOUT)))
+}
+
+/// The refusal for a start in a remote project's folder on a host too old to keep it there.
+pub(crate) fn older_host(name: &str) -> String {
+    format!("{name} runs an older PandaCode, which would start this task in a new worktree instead of the project folder. Update PandaCode on {name}, or choose Runs in → New worktree.")
+}
+
+/// Refuses a start in a remote project's folder (`checkout: "current"`) on a host that would
+/// ignore it, so the task never lands in a worktree unasked. Each host's answer is kept for
+/// [`HELLO_FOR`]; a failed ask is not kept (the start then fails as it would anyway).
+pub(crate) async fn require_project_checkout(app: &tauri::AppHandle, device: &str) -> Result<()> {
+    static KNOWN: OnceLock<Mutex<HashMap<String, (bool, Instant)>>> = OnceLock::new();
+    let known = KNOWN.get_or_init(Default::default);
+    let cached = known.lock().unwrap_or_else(|e| e.into_inner()).get(device).filter(|(_, at)| at.elapsed() < HELLO_FOR).map(|(takes, _)| *takes);
+    let takes = match cached {
+        Some(takes) => takes,
+        None => {
+            let hello = client::call(app, device, "host.hello", json!({})).await;
+            // Offline or a lost reply: not an answer about the host's version.
+            if let Err(error) = &hello {
+                if error != "Unknown method." && !error.contains("not allowed") && !error.contains("Unknown remote method") {
+                    return Err(error.clone());
+                }
+            }
+            let takes = takes_project_checkout(&hello);
+            known.lock().unwrap_or_else(|e| e.into_inner()).insert(device.to_owned(), (takes, Instant::now()));
+            takes
+        }
+    };
+    if takes {
+        Ok(())
+    } else {
+        Err(older_host(&super::device_label(device)))
+    }
+}
+
 /// Whether a mirror's messages wait for it to be opened.
 pub(crate) fn deferred(store: &Store, local: &str) -> bool {
     store.db.query_row("SELECT remote_deferred FROM sessions WHERE id=?1", [local], |r| r.get(0)).unwrap_or(false)
@@ -428,6 +471,16 @@ mod tests {
         apply(&store, "linux", &reply(json!([{"id": "p1", "name": "orbit"}]), json!([later]))).unwrap();
         let stage: String = store.db.query_row("SELECT task_stage FROM sessions WHERE remote_session='t3'", [], |r| r.get(0)).unwrap();
         assert_eq!(stage, "completed");
+    }
+
+    #[test]
+    fn only_a_host_that_says_so_runs_a_task_in_the_project_folder() {
+        assert!(takes_project_checkout(&Ok(json!({"features": ["packedFrames", "projectCheckout"]}))));
+        assert!(!takes_project_checkout(&Ok(json!({"features": ["packedFrames"]}))), "a host before it");
+        assert!(!takes_project_checkout(&Err("Unknown method.".into())), "a host before host.hello");
+        assert!(older_host("Linux box").contains("Update PandaCode on Linux box"));
+        // This build's own hello says so.
+        assert!(takes_project_checkout(&Ok(crate::remote::methods::hello_reply("1.0.0", false, Some("full")))));
     }
 
     #[test]

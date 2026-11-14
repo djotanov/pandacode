@@ -775,6 +775,7 @@ const worktrees = createWorktrees({
   call, modal, closeModal, notify, notifyError, showChoices,
   session, project,
   git: () => state.git, gitError: () => state.gitError,
+  remoteWorktree: task => remoteWorktrees.has(task.id),
   draft: () => document.querySelector<HTMLTextAreaElement>('#prompt')?.value ?? '',
   attachable: () => newTaskView(),
   computer: (task, fresh) => computerControl(task, fresh, remoteTargets, remoteChoice, cloudTargets, remoteChoiceName, projectRemote(task.projectId)) + botTaskControl(task, fresh),
@@ -7295,6 +7296,22 @@ let remoteChoiceName: string | undefined;
 let renderedRemoteKey = '';
 let pairingPrompt: (() => void) | undefined, pairingLoading = false;
 const remoteChecks = new Set<string>(), remoteStartCancels = new Set<string>(), remoteRetries = new Set<string>(), remoteRetryErrors = new Map<string, string>();
+/** New tasks in another computer's project that start in a new worktree there (the Checkout menu). */
+const remoteWorktrees = new Set<string>();
+/** The Checkout menu of a New task in another computer's project: its folder there, or a new worktree. */
+async function showRemoteCheckout(anchor: HTMLElement): Promise<void> {
+  const task = session(), remote = task && projectRemote(task.projectId);
+  if (!task || !remote || task.remoteDevice || !newTaskView()) return;
+  const worktree = remoteWorktrees.has(task.id);
+  await showChoices(anchor, { title: 'Runs in', width: 300, items: [
+    { id: 'local', label: 'Project folder', description: `The project’s own checkout on ${remote.name}`, icon: 'folder', selected: !worktree },
+    { id: 'worktree', label: 'New worktree', description: `An isolated branch on ${remote.name}, so its folder stays as it is`, icon: 'worktree', selected: worktree },
+  ], onSelect: id => {
+    closeChoiceMenu();
+    if (id === 'worktree') remoteWorktrees.add(task.id); else remoteWorktrees.delete(task.id);
+    if (session()?.id === task.id) renderComposer();
+  } });
+}
 /** Where a project is, as menus show it: its folder, or the computer it is on. */
 function projectWhere(p: Project): string {
   return p.remoteDevice ? `On ${p.remoteDevice.name}` : p.path;
@@ -7580,7 +7597,7 @@ async function sendRemote(s: Session, target: RemoteTarget, draft: string, text:
     const started = await trackRemoteStart(s.id, target, startId => call<{ sessionId: string; note?: string }>('remote_start_task', {
       // The empty New task draft becomes the mirror, so no stray draft is left behind.
       sessionId: s.id, deviceId: target.deviceId, projectId: s.projectId, prompt: content, provider: s.provider, model: s.model, mode: s.mode,
-      effort: s.reasoningEffort ?? null, worktree: Boolean(s.worktreePath), branch: s.worktreeBranch || state.git?.branch || check.branch || null, startId, imageIds,
+      effort: s.reasoningEffort ?? null, worktree: Boolean(s.worktreePath) || (Boolean(projectRemote(s.projectId)) && remoteWorktrees.has(s.id)), branch: s.worktreeBranch || state.git?.branch || check.branch || null, startId, imageIds,
     }), undefined, onStage).catch((error: unknown) => { if (!remoteStartCancels.has(s.id)) console.error(error); return undefined; });
     accepted = Boolean(started);
     if (!started || started.sessionId !== s.id) {
@@ -8087,6 +8104,7 @@ async function action(name: string, element: HTMLElement): Promise<void> {
     case 'mark-bots-read': markAllBotsRead(sidebarBots, bot => state.sessions.filter(task => task.projectId === bot.projectId && task.lastResponseAt).map(task => task.lastResponseAt!)); renderBots(); break;
     case 'open-bot': if (element.dataset.bot) await openBot(element.dataset.bot); break;
     case 'computer-menu': await showComputerMenu(element); break;
+    case 'remote-checkout': await showRemoteCheckout(element); break;
     case 'remote-choose-computer': { const chip = document.querySelector<HTMLElement>('#composer-computer'); if (chip) await showComputerMenu(chip); break; }
     case 'bot-task-menu': await showBotTaskMenu(element); break;
     case 'cloud-menu': await showCloudMenu(element); break;

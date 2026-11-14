@@ -69,9 +69,27 @@ test('a New task in another computer’s project starts there by project', async
   await page.getByRole('textbox', { name: 'Message your coding agent' }).press('Enter');
   await expect.poll(() => page.evaluate(() => (window as any).__remoteStarts?.length ?? 0)).toBe(1);
   const started = await page.evaluate(() => (window as any).__remoteStarts[0]);
-  expect(started).toMatchObject({ deviceId: 'dev-nas', projectId: 'remote-dev-nas-atlas', prompt: 'Add a retry to the upload client' });
+  expect(started).toMatchObject({ deviceId: 'dev-nas', projectId: 'remote-dev-nas-atlas', prompt: 'Add a retry to the upload client', worktree: false });
   // A remote project has no local checkout to compare with GitHub.
   expect(await page.evaluate(() => (window as any).__remoteRepoChecks ?? [])).toEqual([]);
+});
+
+test('a New task in another computer’s project can start in a new worktree there', async ({ page }) => {
+  await signIn(page);
+  await showNas(page);
+  await page.getByRole('button', { name: 'Filter projects' }).click();
+  await page.getByRole('menuitemradio', { name: /atlas/ }).click();
+  await page.locator('.new-task-button').click();
+  const checkout = page.locator('#remote-checkout');
+  await expect(checkout).toHaveAccessibleName('Checkout: Project folder on Home NAS');
+  await checkout.click();
+  await page.getByRole('menuitemradio', { name: 'New worktree' }).click();
+  await expect(checkout).toHaveAccessibleName('Checkout: New worktree on Home NAS');
+  await expect(checkout).toHaveAttribute('data-checkout', 'worktree');
+  await page.getByRole('textbox', { name: 'Message your coding agent' }).fill('Try the retry in isolation');
+  await page.getByRole('textbox', { name: 'Message your coding agent' }).press('Enter');
+  await expect.poll(() => page.evaluate(() => (window as any).__remoteStarts?.length ?? 0)).toBe(1);
+  expect(await page.evaluate(() => (window as any).__remoteStarts[0])).toMatchObject({ deviceId: 'dev-nas', projectId: 'remote-dev-nas-atlas', worktree: true });
 });
 
 test('Stop showing a computer removes its projects and task copies here', async ({ page }) => {
@@ -99,4 +117,23 @@ test('a computer that can’t be reached is reported, and nothing is shown', asy
   await expect(page.getByText('That computer is offline.')).toBeVisible();
   await expect(dialog).toBeVisible();
   await expect(remoteTask(page)).toHaveCount(0);
+});
+
+test('a computer on an older PandaCode is not asked to run a task in its project folder', async ({ page }) => {
+  await signIn(page);
+  await showNas(page);
+  await page.evaluate(() => { (window as any).__remoteOlderHost = true; });
+  await page.getByRole('button', { name: 'Filter projects' }).click();
+  await page.getByRole('menuitemradio', { name: /atlas/ }).click();
+  await page.locator('.new-task-button').click();
+  await page.getByRole('textbox', { name: 'Message your coding agent' }).fill('Fix it in place');
+  await page.getByRole('textbox', { name: 'Message your coding agent' }).press('Enter');
+  await expect(page.getByText('Update PandaCode on Home NAS, or choose Runs in → New worktree.', { exact: false }).first()).toBeVisible();
+  expect(await page.evaluate(() => (window as any).__remoteStarts ?? [])).toEqual([]);
+  // A worktree is what that computer does anyway, so it goes.
+  await page.locator('#remote-checkout').click();
+  await page.getByRole('menuitemradio', { name: 'New worktree' }).click();
+  await page.getByRole('textbox', { name: 'Message your coding agent' }).fill('Fix it in a worktree');
+  await page.getByRole('textbox', { name: 'Message your coding agent' }).press('Enter');
+  await expect.poll(() => page.evaluate(() => (window as any).__remoteStarts?.length ?? 0)).toBe(1);
 });
