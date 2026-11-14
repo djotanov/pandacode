@@ -4,6 +4,7 @@
 mod auth;
 mod bench;
 pub(crate) mod browse;
+pub(crate) mod inspect;
 pub(crate) mod catalog;
 mod client;
 mod config;

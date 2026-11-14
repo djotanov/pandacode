@@ -920,6 +920,7 @@ async fn dispatch(
             // File validation remains native before asking the trusted UI to show it.
             if name == "pandacode_open_file" {
                 crate::read_file(
+                    app.clone(),
                     state,
                     current.project_id,
                     Some(sid.to_owned()),

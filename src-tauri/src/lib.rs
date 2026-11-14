@@ -3215,21 +3215,30 @@ async fn jj_log(state: State<'_, AppState>, project_id: String, session_id: Opti
 
 #[tauri::command]
 async fn git_status(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     project_id: String,
     session_id: Option<String>,
 ) -> Result<workspace::GitStatus> {
+    // A task on another computer: its host's status (remote/inspect.rs).
+    if let Some(status) = remote::inspect::git_status(&app, &state, session_id.as_deref()).await? {
+        return Ok(status);
+    }
     let root = state.root(&project_id, session_id.as_deref())?;
     blocking(move || workspace::git_status(&root, workspace::Trust::Desktop)).await
 }
 #[tauri::command]
 async fn git_diff(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     project_id: String,
     session_id: Option<String>,
     path: Option<String>,
     staged: Option<bool>,
 ) -> Result<String> {
+    if let Some(diff) = remote::inspect::git_diff(&app, &state, session_id.as_deref(), path.as_deref(), staged.unwrap_or(false)).await? {
+        return Ok(diff);
+    }
     let root = state.root(&project_id, session_id.as_deref())?;
     blocking(move || workspace::git_diff(&root, path, staged.unwrap_or(false), workspace::Trust::Desktop)).await
 }
@@ -3822,11 +3831,15 @@ async fn workspace_file_stamp(
 }
 #[tauri::command]
 async fn list_files(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     project_id: String,
     session_id: Option<String>,
     path: Option<String>,
 ) -> Result<Vec<workspace::FileEntry>> {
+    if let Some(entries) = remote::inspect::list_files(&app, &state, session_id.as_deref(), path.as_deref()).await? {
+        return Ok(entries);
+    }
     let root = state.root(&project_id, session_id.as_deref())?;
     blocking(move || workspace::list_files(&root, path)).await
 }
@@ -3860,11 +3873,15 @@ async fn search_text(
 }
 #[tauri::command]
 async fn read_file(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     project_id: String,
     session_id: Option<String>,
     path: String,
 ) -> Result<String> {
+    if let Some(text) = remote::inspect::read_file(&app, &state, session_id.as_deref(), &path).await? {
+        return Ok(text);
+    }
     let root = state.root(&project_id, session_id.as_deref())?;
     blocking(move || workspace::read_file(&root, path)).await
 }

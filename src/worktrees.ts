@@ -74,8 +74,10 @@ export function createWorktrees(host: WorktreeHost) {
     const branch = session.worktreePath && (missing || !git?.branch) ? session.worktreeBranch || '' : git?.branch || '';
     const path = session.worktreePath ?? project?.path ?? '';
     // A task on another computer has its checkout there: name the branch, offer no local actions.
+    // Its branch: the one it started on, else the host's checkout as its status reports it (remote/inspect.rs).
+    const remoteBranch = session.remoteDevice ? session.worktreeBranch || (git?.isRepo ? git.branch : '') : '';
     const chip = session.remoteDevice
-      ? `<span class="branch-chip branch-chip-fixed" data-tip="${escape(`Branch ${session.worktreeBranch || 'unknown'} · actions run on ${session.remoteDevice.name}, not here`)}">${icon(session.worktreePath ? 'worktree' : 'branch')}<span class="branch-chip-name">${escape(session.worktreeBranch || 'Remote checkout')}</span></span>`
+      ? `<span class="branch-chip branch-chip-fixed" data-tip="${escape(`Branch ${remoteBranch || 'unknown'} · actions run on ${session.remoteDevice.name}, not here`)}">${icon(session.worktreePath ? 'worktree' : 'branch')}<span class="branch-chip-name">${escape(remoteBranch || 'Remote checkout')}</span></span>`
       : git?.isRepo || session.worktreePath
       ? `<button type="button" id="branch-chip" class="branch-chip ${missing ? 'branch-chip-missing' : ''}" data-action="branch-menu" aria-label="${escape(missing ? 'Worktree missing' : `Branch ${branch || 'detached HEAD'}`)}" aria-description="Branch and worktree actions" aria-haspopup="dialog" aria-expanded="false" data-tip="${escape(missing ? `Worktree missing · was at ${path}` : `Branch ${branch || 'detached HEAD'} · ${session.worktreePath ? 'worktree' : 'checkout'} at ${path}`)}">${icon(missing ? 'alert' : 'branch')}<span class="branch-chip-name">${escape(missing ? 'Worktree missing' : branch || 'Detached HEAD')}</span>${icon('down')}</button>`
       : '';

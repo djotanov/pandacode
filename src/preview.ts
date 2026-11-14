@@ -2276,7 +2276,8 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
       const stopped = session(args.sessionId); stopped.status = 'idle'; if (stopped.goalState?.status === 'active') { stopped.goalState.status = 'paused'; emitGoal(stopped); } syncMirror(args.sessionId); agent({ sessionId: args.sessionId, kind: 'done', text: 'Stopped' }); break;
     }
     case 'respond_approval': case 'respond_user_input': break;
-    case 'git_status': result = checkoutGit(args.sessionId); break;
+    case 'git_status': { const mirror = args.sessionId ? sessions.find(s => s.id === args.sessionId)?.remoteDevice : null; if (mirror) ((window as any).__remoteInspects ??= []).push({ command, sessionId: args.sessionId }); }
+      result = checkoutGit(args.sessionId); break;
     case 'git_diff': if (benchDiffs && BENCH_DIFFS[args.path]) { result = BENCH_DIFFS[args.path](); break; } result = `diff --git a/${args.path ?? 'src/components/search.ts'} b/${args.path ?? 'src/components/search.ts'}\nindex 64d221a..0e6c9ef 100644\n--- a/${args.path ?? 'src/components/search.ts'}\n+++ b/${args.path ?? 'src/components/search.ts'}\n@@ -12,5 +12,6 @@ export function mountSearch(items) {\n+  const index = createSearchIndex(items);\n+\n   input.addEventListener("input", () => {\n-    const index = createSearchIndex(items);\n-    renderAll(index.search(input.value));\n+    renderResults(index.search(input.value));\n   });\n }`; break;
     case 'git_stage': checkoutGit(args.sessionId).files.forEach(file => { if (args.paths.includes(file.path)) { file.index = args.staged ? 'M' : ' '; file.working = args.staged ? ' ' : 'M'; } }); break;
     case 'git_commit': {
@@ -2572,8 +2573,8 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
       result = await response.arrayBuffer();
       break;
     }
-    // Like `Store::workspace_root`: a task on another computer has no checkout here.
-    case 'read_file': { const mirror = args.sessionId ? sessions.find(s => s.id === args.sessionId)?.remoteDevice : null; if (mirror) throw new Error(`This task runs on ${mirror.name}.`); }
+    // A task on another computer reads from its host (remote/inspect.rs); `__remoteInspects` records which.
+    case 'read_file': { const mirror = args.sessionId ? sessions.find(s => s.id === args.sessionId)?.remoteDevice : null; if (mirror) ((window as any).__remoteInspects ??= []).push({ command, sessionId: args.sessionId, path: args.path }); }
       result = previewExplorer.read(args, /\.(md|markdown)$/i.test(args.path) ? sampleReadme : args.path.endsWith('.json') ? '{\n  "name": "orbit",\n  "private": true,\n  "type": "module"\n}' : args.path.endsWith('.html') ? '<!doctype html>\n<html><head><title>Orbit</title></head><body><h1>Orbit</h1></body></html>' : args.path.endsWith('.svg') ? '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6"/></svg>' : sampleSource); break;
     case 'workspace_file_stamp': result = previewExplorer.stamp(args); break;
     case 'manage_workspace_entry': result = previewExplorer.manage(args, projects.find(project => project.id === args.projectId)?.path ?? ''); break;
@@ -2582,6 +2583,7 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
       previewExplorer.save(args, original); result = null; break;
     }
     case 'open_workspace_file': result = null; break;
+
     case 'get_metrics': result = { coreRssBytes: 0, activeAgents: timers.size, activeTerminals: 0, databaseBytes: 0 }; break;
     case 'get_terminal_activity': result = { running: false, processNames: [], uncertain: false }; break;
     case 'get_run_script': result = null; break;

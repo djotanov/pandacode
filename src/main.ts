@@ -5765,7 +5765,9 @@ async function refreshInspectorIfStale(): Promise<void> {
 async function refreshInspector(): Promise<void> {
   void projectRunner.refresh();
   const request = ++inspectorRequest;
-  const p = project(); if (!p || p.remoteDevice) { state.git = null; state.jj = null; state.files = []; state.gitError = ''; state.filesError = ''; state.inspectorLoading = false; renderInspector(); return; }
+  // Another computer's project before its task exists there: nothing to ask yet. A task running there
+  // (a mirror) asks its host (remote/inspect.rs).
+  const p = project(); if (!p || (p.remoteDevice && !session()?.remoteDevice)) { state.git = null; state.jj = null; state.files = []; state.gitError = ''; state.filesError = ''; state.inspectorLoading = false; renderInspector(); return; }
   state.inspectorLoading = true; renderInspector();
   const id = p.id, folders = [...state.openFolders], context = workspaceContext(), key = workspaceKey();
   const [results, children] = await Promise.all([
@@ -6021,7 +6023,8 @@ function showChangesView(target: HTMLElement, key: string): void {
       refresh: () => run(refreshInspector()),
       notify, notifyError,
       choose: (anchor, title, items, onSelect) => void showChoices(anchor, { title, width: 260, actions: !items.some(item => item.selected !== undefined), items, onSelect: id => { closeChoiceMenu(); onSelect(id); } }),
-      worktree: () => worktrees.openDialog(newTaskView() ? 'attach' : 'new'),
+      // A task on another computer is reviewed here and committed there.
+      ...session()?.remoteDevice ? { readOnly: true } : { worktree: () => worktrees.openDialog(newTaskView() ? 'attach' : 'new') },
     });
     changesViewKey = key;
   }
@@ -6090,8 +6093,9 @@ function renderInspector(): void {
   $('.inspector-tabs [data-action="tab-changes"]').setAttribute('aria-label', changeCount ? `Changes, ${changeCount} changed ${changeCount === 1 ? 'file' : 'files'}` : 'Changes');
   $('#inspector-title').textContent = INSPECTOR_TITLES[state.inspectorTab];
   $('#changes-count').textContent = state.git?.files.length ? String(state.git.files.length) : '';
-  const changesKey = `${state.projectId}\0${state.sessionId}\0${workspacePath()}`;
-  const keepChanges = state.inspectorTab === 'changes' && !state.selectedKind && Boolean(project()) && !session()?.remoteDevice && !(state.jj?.isRepo && !state.jj.colocated) && changesViewKey === changesKey && (state.inspectorLoading || (!state.gitError && Boolean(state.git?.isRepo)));
+  // A New task that starts on another computer keeps its id: the key changes with it, so the view remounts read only.
+  const changesKey = `${state.projectId}\0${state.sessionId}\0${workspacePath()}\0${session()?.remoteDevice?.id ?? ''}`;
+  const keepChanges = state.inspectorTab === 'changes' && !state.selectedKind && Boolean(project()) && !(state.jj?.isRepo && !state.jj.colocated) && changesViewKey === changesKey && (state.inspectorLoading || (!state.gitError && Boolean(state.git?.isRepo)));
   if (!keepChanges) disposeChangesView();
   syncBrowserPanel();
   syncSimulatorPanel();
@@ -6104,9 +6108,10 @@ function renderInspector(): void {
   if (state.inspectorTab === 'btw' && visible) { btwPanel.show(target); return; }
   btwPanel.dispose();
   if (!project()) { target.innerHTML = '<div class="inspector-empty">Open a project to browse files and review changes.</div>'; return; }
-  // A mirror, or any task of another computer's project: nothing of it is on this disk.
-  const remote = session()?.remoteDevice ?? project()?.remoteDevice;
-  if (remote) { $('#changes-count').textContent = ''; target.innerHTML = `<div class="inspector-empty">${icon('monitor')}<h3>Runs on ${escape(remote.name)}</h3><p>Its changes and files are on that computer, so review and commit them there.</p></div>`; return; }
+  // A New task in another computer's project: its checkout is there, and there is no task to ask about yet.
+  // A task running there (a mirror) shows its host's changes and files, read only.
+  const remote = session()?.remoteDevice ? undefined : project()?.remoteDevice;
+  if (remote) { $('#changes-count').textContent = ''; target.innerHTML = `<div class="inspector-empty">${icon('monitor')}<h3>On ${escape(remote.name)}</h3><p>Start the task to review its changes and files here.</p></div>`; return; }
   if (state.inspectorTab === 'search' && !state.selectedKind) { searchPanel.show(target); return; }
   // A refresh keeps the mounted Changes view on screen until the new status arrives.
   if (state.inspectorLoading && changesView) return;

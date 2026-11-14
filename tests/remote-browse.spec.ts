@@ -39,6 +39,10 @@ test('another computer’s projects and tasks show here, and its tasks open like
   await remoteTask(page).click();
   await expect(page.locator('#transcript')).toContainText("raced the upload's progress callback");
   await expect(page.locator('#composer-area .composer-computer-fixed')).toHaveText('on Home NAS');
+  // Its changes come from that computer, for review only (remote/inspect.rs).
+  await page.locator('[data-action="tab-changes"]').click();
+  await expect(page.locator('#inspector-content .changes-view')).toBeVisible();
+  await expect.poll(() => page.evaluate(() => ((window as any).__remoteInspects ?? []).filter((call: { sessionId: string }) => call.sessionId === 'remote-dev-nas-task-1').length)).toBeGreaterThan(0);
 
   // Its projects are in the filter, located on that computer, not in a folder here.
   await page.getByRole('button', { name: 'Filter projects' }).click();
@@ -58,7 +62,9 @@ test('a New task in another computer’s project starts there by project', async
   await expect(chip).toHaveText('on Home NAS');
   await expect(chip).toHaveAttribute('data-tip', 'This project is on Home NAS, so its tasks run there.');
   await expect(page.locator('#composer-computer')).toHaveCount(0);
-  // Nothing of it is on this disk: the inspector says where it is instead of reading a folder.
+  // Nothing of it is on this disk: until the task exists there, the inspector says where it is.
+  await page.locator('[data-action="tab-changes"]').click();
+  await expect(page.locator('#inspector-content')).toContainText('Start the task to review its changes and files here.');
   await page.getByRole('textbox', { name: 'Message your coding agent' }).fill('Add a retry to the upload client');
   await page.getByRole('textbox', { name: 'Message your coding agent' }).press('Enter');
   await expect.poll(() => page.evaluate(() => (window as any).__remoteStarts?.length ?? 0)).toBe(1);

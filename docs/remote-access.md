@@ -88,9 +88,23 @@ of shown computers is `browsed` in `remote.json`.
 - **Window.** A task in a remote project uses that computer as its Run on choice, fixed
   (`projectRemote`/`runChoice` in `main.ts`; the chip says "This project is on <computer>, so its
   tasks run there."), so the model picker, offline note and start progress are the mirror ones.
-  The inspector shows "Runs on <computer>" without any git or file call, the branch menu is not
-  offered, and menus show the project as "On <computer>". A send that would run such a task
-  here (a board task, say) is refused.
+  Before its task exists there, the inspector says where the project is without any git or file
+  call; the branch menu is not offered, and menus show the project as "On <computer>". A send
+  that would run such a task here (a board task, say) is refused.
+
+## Remote inspector
+
+The Changes and Files views of a mirror (any task that runs on another computer, in a remote
+project or not) show its host's checkout, for review only (`src-tauri/src/remote/inspect.rs`).
+`git_status`, `git_diff`, `list_files` and `read_file` called with a mirror's `sessionId` ask its
+host (`git.status`, `task.diff`, `files.list`, `files.read` with the host's task id) and answer in
+this computer's shapes: the host's staged, unstaged and untracked lists become one row per path
+with its index and working-tree codes (untracked `??`), and a file is read page by page up to
+2 MiB (an image or other non-text file is refused). A diff that left out secret files (the
+device is below Full there) ends with a line counting them. Every other command (stage, commit,
+discard, branch, worktree, jj) still refuses a mirror. The Changes view is mounted `readOnly`:
+its menus offer Refresh, Open file and Copy path, but no stage, commit or worktree action. The
+composer's branch chip names the task's branch, else the host checkout's.
 
 ## Accounts
 
