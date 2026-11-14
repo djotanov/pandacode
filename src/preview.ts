@@ -2598,9 +2598,12 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
       break;
     }
     // A task on another computer reads from its host (remote/inspect.rs); `__remoteInspects` records which.
-    case 'read_file': { const mirror = args.sessionId ? sessions.find(s => s.id === args.sessionId)?.remoteDevice : null; if (mirror) ((window as any).__remoteInspects ??= []).push({ command, sessionId: args.sessionId, path: args.path }); }
+    case 'read_file': { const mirror = args.sessionId ? sessions.find(s => s.id === args.sessionId)?.remoteDevice : null; if (mirror) {
+        ((window as any).__remoteInspects ??= []).push({ command, sessionId: args.sessionId, path: args.path });
+        if (typeof (window as any).__remoteFileText === 'string') { result = (window as any).__remoteFileText; break; }
+      } }
       result = previewExplorer.read(args, /\.(md|markdown)$/i.test(args.path) ? sampleReadme : args.path.endsWith('.json') ? '{\n  "name": "orbit",\n  "private": true,\n  "type": "module"\n}' : args.path.endsWith('.html') ? '<!doctype html>\n<html><head><title>Orbit</title></head><body><h1>Orbit</h1></body></html>' : args.path.endsWith('.svg') ? '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6"/></svg>' : sampleSource); break;
-    case 'workspace_file_stamp': result = previewExplorer.stamp(args); break;
+    case 'workspace_file_stamp': result = args.sessionId && sessions.find(s => s.id === args.sessionId)?.remoteDevice ? 'remote' : previewExplorer.stamp(args); break;
     case 'manage_workspace_entry': result = previewExplorer.manage(args, projects.find(project => project.id === args.projectId)?.path ?? ''); break;
     case 'write_workspace_file': {
       const original = await invoke<string>('read_file', args);

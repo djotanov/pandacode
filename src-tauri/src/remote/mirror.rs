@@ -1331,8 +1331,12 @@ fn catch_up(app: &tauri::AppHandle, device: &str, reply: &Value, requested: &[St
         let Some(local) = local else { continue };
         // A copy shown from a remote project goes with its task.
         if lock(&state).is_ok_and(|store| super::browse::in_remote_project(&store, &local)) {
-            remote(app).lock().viewer.cards.remove(&local);
-            super::browse::forget(app, &local);
+            // The host may have finished and deleted this task while we were disconnected.
+            // End its stale local run first: ordinary deletion refuses running copies.
+            finish(app, &local, false, true, "This task is no longer on the other computer.");
+            if let Err(error) = super::browse::forget(app, &local) {
+                eprintln!("PandaCode Connect: could not remove a missing task's copy: {error}");
+            }
             continue;
         }
         if active(&state, &local) {

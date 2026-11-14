@@ -112,23 +112,41 @@ pub(crate) fn page_text(page: &Value, offset: usize) -> Result<(&str, bool)> {
     Ok((page["text"].as_str().unwrap_or_default(), page["done"] == true))
 }
 
+/// A paged read is one snapshot: offsets alone cannot detect an agent editing between pages.
+#[derive(Default)]
+struct FileCopy {
+    text: String,
+    hash: Option<String>,
+}
+impl FileCopy {
+    fn push(&mut self, page: &Value) -> Result<bool> {
+        let (chunk, done) = page_text(page, self.text.len())?;
+        let hash = page["hash"].as_str().filter(|hash| !hash.is_empty()).ok_or("The other computer sent a file page without its content hash.")?;
+        if self.hash.as_deref().is_some_and(|previous| previous != hash) {
+            return Err("This file changed on the other computer while it was being read. Refresh to try again.".into());
+        }
+        if chunk.is_empty() && !done {
+            return Err("The other computer sent an empty unfinished file page.".into());
+        }
+        self.hash = Some(hash.to_owned());
+        self.text.push_str(chunk);
+        Ok(done)
+    }
+}
+
 /// `read_file` for a mirror, from its host page by page (up to [`MAX_READ`]); None for a local task.
 pub(crate) async fn read_file(app: &tauri::AppHandle, state: &AppState, session: Option<&str>, path: &str) -> Result<Option<String>> {
     let Some(host) = host_of(state, session)? else { return Ok(None) };
-    let mut text = String::new();
+    let mut copy = FileCopy::default();
     for _ in 0..MAX_PAGES {
-        let page = client::call(app, &host.device, "files.read", json!({"sessionId": host.session, "path": path, "offset": text.len()})).await?;
-        let (chunk, done) = page_text(&page, text.len())?;
-        text.push_str(chunk);
-        if done || chunk.is_empty() {
-            return Ok(Some(text));
+        let page = client::call(app, &host.device, "files.read", json!({"sessionId": host.session, "path": path, "offset": copy.text.len()})).await?;
+        if copy.push(&page)? {
+            return Ok(Some(copy.text));
         }
-        if text.len() >= MAX_READ {
-            break;
-        }
+        if copy.text.len() >= MAX_READ { break; }
     }
-    text.push_str("\n[Preview truncated: the rest of this file is on the other computer]\n");
-    Ok(Some(text))
+    copy.text.push_str("\n[Preview truncated: the rest of this file is on the other computer]\n");
+    Ok(Some(copy.text))
 }
 
 /// The stamp of a file a mirror shows: fixed, so its tab reads the file from the host once when
@@ -185,6 +203,20 @@ mod tests {
     fn a_diff_says_how_many_secret_files_were_left_out() {
         assert_eq!(diff_from(&json!({"diff": "diff --git a/x b/x\n", "truncated": false})), "diff --git a/x b/x\n");
         assert!(diff_from(&json!({"diff": "", "hiddenSecrets": 2})).contains("2 files that may hold secrets"));
+    }
+
+    #[test]
+    fn paged_files_cannot_mix_snapshots_or_accept_missing_hashes() {
+        let page = |text: &str, offset: usize, hash: &str, done: bool| json!({"kind": "text", "text": text, "offset": offset, "hash": hash, "done": done});
+        let mut copy = FileCopy::default();
+        assert!(!copy.push(&page("first", 0, "version-a", false)).unwrap());
+        assert!(copy.push(&page("other", 5, "version-b", true)).unwrap_err().contains("changed"));
+        assert_eq!(copy.text, "first", "the mismatched page is never appended");
+        assert!(copy.push(&page(" last", 5, "version-a", true)).unwrap());
+        assert_eq!(copy.text, "first last");
+        assert!(FileCopy::default().push(&page("", 0, "version-a", false)).is_err());
+        assert!(FileCopy::default().push(&page("x", 0, "", true)).is_err());
+        assert!(FileCopy::default().push(&page("", 0, "empty-hash", true)).unwrap());
     }
 
     #[test]

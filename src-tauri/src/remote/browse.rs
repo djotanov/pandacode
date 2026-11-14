@@ -21,7 +21,7 @@ use tauri::{Emitter, Manager};
 const LIST_LIMIT: usize = 200;
 const MAX_NAME: usize = 200;
 /// A shown computer's list is asked again at most this often with the subscribe rounds.
-const REFRESH_EVERY: Duration = Duration::from_secs(30);
+pub(super) const REFRESH_EVERY: Duration = Duration::from_secs(30);
 
 /// The `path` of a remote project: unique per computer and project, and never a real folder.
 pub(crate) fn placeholder_path(device: &str, project: &str) -> String {
@@ -128,12 +128,16 @@ pub(crate) fn apply(store: &Store, device: &str, reply: &Value) -> Result<Applie
         let title = text(&task["title"], MAX_NAME).unwrap_or("New conversation");
         let existing: Option<(String, bool)> = store.db.query_row("SELECT id,remote_deferred FROM sessions WHERE remote_device=?1 AND remote_session=?2", [device, session], |r| Ok((r.get(0)?, r.get(1)?))).optional().map_err(|e| e.to_string())?;
         match existing {
-            // Never opened here: it follows the host's title and stage.
-            Some((id, true)) => {
-                let changed = store.db.execute("UPDATE sessions SET title=?2,task_stage=?3 WHERE id=?1 AND (title<>?2 OR task_stage<>?3)", params![id, title, stage_of(task)]).map_err(|e| e.to_string())?;
+            // Message deferral controls history downloads, not host-owned task metadata.
+            Some((id, _)) => {
+                let changed = store.db.execute(
+                    "UPDATE sessions SET title=?2,task_stage=?3,pinned=?4,archived=?5,
+                     completed_at=CASE WHEN ?3='completed' THEN COALESCE(completed_at,?6) ELSE NULL END
+                     WHERE id=?1 AND (title<>?2 OR task_stage<>?3 OR pinned<>?4 OR archived<>?5)",
+                    params![id, title, stage_of(task), task["pinned"] == true, task["archived"] == true, task["updatedAt"].as_i64().unwrap_or_else(crate::storage::now)],
+                ).map_err(|e| e.to_string())?;
                 applied.sessions |= changed > 0;
             }
-            Some((_, false)) => {}
             // Settled there before it was ever shown here: history, not work to follow.
             None if stage_of(task) == "completed" => {}
             None => {
@@ -267,15 +271,35 @@ pub(crate) fn in_remote_project(store: &Store, local: &str) -> bool {
 }
 
 /// Removes the copy of a task its host no longer has.
-pub(crate) fn forget(app: &tauri::AppHandle, local: &str) {
+pub(crate) fn forget(app: &tauri::AppHandle, local: &str) -> Result<()> {
     let state = app.state::<AppState>();
-    if crate::task_deletion::delete_state(&state, local).is_ok() {
-        let _ = app.emit("sessions-changed", ());
+    forget_state(&state, local)?;
+    let _ = app.emit("sessions-deleted", json!({"sessionIds": [local]}));
+    let _ = app.emit("sessions-changed", ());
+    Ok(())
+}
+
+fn forget_state(state: &AppState, local: &str) -> Result<()> {
+    {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        if super::mirror::of(&store, local)?.is_none() {
+            return Err("Only a remote task's copy can be forgotten.".into());
+        }
+        super::mirror::finish_once(&store, local, false, true)?;
     }
+    crate::task_deletion::delete_state(state, local).map(drop)
 }
 
 fn browsed(app: &tauri::AppHandle) -> Vec<String> {
     remote(app).lock().settings.browsed.iter().cloned().collect()
+}
+
+/// Serialize hide/show and background listings so a late reply cannot recreate hidden rows.
+type DeviceGate = std::sync::Arc<tokio::sync::Mutex<()>>;
+fn device_gate(device: &str) -> DeviceGate {
+    static GATES: OnceLock<Mutex<HashMap<String, DeviceGate>>> = OnceLock::new();
+    GATES.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner())
+        .entry(device.to_owned()).or_default().clone()
 }
 
 /// Asks `device` for its projects and tasks and applies them.
@@ -310,6 +334,9 @@ pub(crate) async fn refresh(app: &tauri::AppHandle) -> bool {
     let online: HashSet<String> = remote(app).lock().devices.iter().filter(|d| d.online && d.host).map(|d| d.id.clone()).collect();
     let devices: Vec<String> = browsed(app).into_iter().filter(|device| online.contains(device) && !listed_recently(device)).collect();
     let rounds = devices.iter().map(|device| async move {
+        let gate = device_gate(device);
+        let _guard = gate.lock().await;
+        if !browsed(app).iter().any(|shown| shown == device) { return false; }
         match refresh_one(app, device).await {
             Ok(applied) => applied.adopted > 0,
             Err(error) => {
@@ -326,7 +353,11 @@ pub(crate) async fn refresh(app: &tauri::AppHandle) -> bool {
 #[tauri::command]
 pub async fn remote_browse(app: tauri::AppHandle, device_id: String, show: bool) -> Result<Value> {
     super::valid_device_id(&device_id)?;
+    let gate = device_gate(&device_id);
+    let _guard = gate.lock().await;
     if !show {
+        // Validate and remove every copy before changing the saved refresh preference.
+        hide(&app, &device_id)?;
         let removed = {
             let state = remote(&app);
             let mut inner = state.lock();
@@ -335,7 +366,6 @@ pub async fn remote_browse(app: tauri::AppHandle, device_id: String, show: bool)
         if removed {
             remote(&app).save();
         }
-        hide(&app, &device_id)?;
         return Ok(json!({"projects": 0, "tasks": 0}));
     }
     {
@@ -374,9 +404,8 @@ fn hide(app: &tauri::AppHandle, device: &str) -> Result<()> {
         let rows = statement.query_map([device], |r| r.get(0)).map_err(|e| e.to_string())?;
         rows.filter_map(std::result::Result::ok).collect()
     };
-    for id in ids {
-        crate::task_deletion::delete_state(&state, &id)?;
-    }
+    let deleted = crate::task_deletion::delete_states(&state, &ids)?;
+    let _ = app.emit("sessions-deleted", json!({"sessionIds": deleted.deleted_session_ids}));
     state.store.lock().map_err(|e| e.to_string())?.db.execute("DELETE FROM projects WHERE remote_device=?1", [device]).map_err(|e| e.to_string())?;
     let _ = app.emit("projects-changed", ());
     let _ = app.emit("sessions-changed", ());
@@ -433,7 +462,7 @@ mod tests {
     }
 
     #[test]
-    fn an_opened_mirror_keeps_its_own_title() {
+    fn an_opened_mirror_follows_host_metadata() {
         let store = store();
         apply(&store, "linux", &reply(json!([{"id": "p1", "name": "orbit"}]), json!([task("t1", "p1")]))).unwrap();
         let local: String = store.db.query_row("SELECT id FROM sessions WHERE remote_session='t1'", [], |r| r.get(0)).unwrap();
@@ -444,7 +473,53 @@ mod tests {
         renamed["title"] = json!("Renamed");
         apply(&store, "linux", &reply(json!([{"id": "p1", "name": "orbit"}]), json!([renamed]))).unwrap();
         let title: String = store.db.query_row("SELECT title FROM sessions WHERE id=?1", [&local], |r| r.get(0)).unwrap();
-        assert_eq!(title, "Task t1", "its messages copy brings the title once opened");
+        assert_eq!(title, "Renamed", "opening must not freeze host metadata");
+    }
+
+    #[test]
+    fn opened_mirrors_follow_settle_reopen_pin_and_archive_without_downloading_messages() {
+        let store = store();
+        let projects = json!([{"id": "p1", "name": "orbit"}]);
+        apply(&store, "linux", &reply(projects.clone(), json!([task("t1", "p1")]))).unwrap();
+        let local: String = store.db.query_row("SELECT id FROM sessions WHERE remote_session='t1'", [], |r| r.get(0)).unwrap();
+        take_deferred(&store, &local).unwrap();
+        let mut host = task("t1", "p1");
+        host["stage"] = json!("completed");
+        host["pinned"] = json!(true);
+        host["title"] = json!("Host title");
+        assert!(apply(&store, "linux", &reply(projects.clone(), json!([host.clone()]))).unwrap().sessions);
+        let settled = store.session(&local).unwrap();
+        assert_eq!(settled.task_stage, "completed");
+        assert!(settled.completed_at.is_some() && settled.pinned);
+        assert_eq!(settled.title, "Host title");
+        host["stage"] = json!("review");
+        host["pinned"] = json!(false);
+        apply(&store, "linux", &reply(projects.clone(), json!([host.clone()]))).unwrap();
+        let reopened = store.session(&local).unwrap();
+        assert_eq!(reopened.task_stage, "review");
+        assert!(reopened.completed_at.is_none() && !reopened.pinned);
+        host["archived"] = json!(true);
+        apply(&store, "linux", &reply(projects, json!([host]))).unwrap();
+        assert!(store.session(&local).unwrap().archived);
+        assert!(store.messages(&local, None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn missing_host_tasks_are_removed_even_if_the_local_copy_still_says_running() {
+        let (state, local_project) = crate::concurrent_task_tests::test_state();
+        let (remote, local) = {
+            let store = state.store.lock().unwrap();
+            apply(&store, "linux", &reply(json!([{"id": "p1", "name": "orbit"}]), json!([task("t1", "p1")]))).unwrap();
+            let remote: String = store.db.query_row("SELECT id FROM sessions WHERE remote_session='t1'", [], |r| r.get(0)).unwrap();
+            store.status(&remote, "waiting").unwrap();
+            let local = store.create_session(&local_project, "claude", "default", "ask").unwrap().id;
+            (remote, local)
+        };
+        assert!(forget_state(&state, &local).is_err(), "never finish or delete a local task");
+        forget_state(&state, &remote).unwrap();
+        let store = state.store.lock().unwrap();
+        assert!(store.session(&remote).is_err());
+        assert!(store.session(&local).is_ok());
     }
 
     #[test]

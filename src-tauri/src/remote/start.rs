@@ -738,6 +738,11 @@ fn prepare(state: &AppState, project: &Project, cloned: bool, worktree: bool, wa
         return prepare_outside_git(state, project, worktree);
     }
     workspace::refuse_untrusted_programs_for(&root, trust, "start a task")?;
+    // A selected branch from a project's list names its local ref, including unpushed commits.
+    // Resolve it before fetching or asking origin for a default branch.
+    if let Some(branch) = wanted.filter(|_| worktree && !cloned && local_branch_ok) {
+        return project_branch_worktree(&root, branch, trust);
+    }
     if !cloned && !has_origin(&root, trust) {
         return prepare_without_origin(state, project, &root, worktree, wanted, trust);
     }
@@ -757,18 +762,17 @@ fn prepare(state: &AppState, project: &Project, cloned: bool, worktree: bool, wa
             }
             return Ok((branch, None, None, reserved));
         }
-        // A project named by id (a remote project's New worktree): the branch the viewer chose
-        // from this checkout's list may exist only here; the worktree starts from it.
-        (true, false) => {
-            if let Some(wanted) = wanted.filter(|wanted| local_branch_ok && *wanted != branch && valid_branch(wanted).is_ok()) {
-                if git_as(&root, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{wanted}")], GIT, trust).is_ok() {
-                    return Ok((wanted.to_owned(), Some(worktree_from(&root, wanted, trust)?), None, None));
-                }
-            }
-            None
-        }
+        (true, false) => None,
     };
     Ok((branch, made, None, None))
+}
+
+fn project_branch_worktree(root: &Path, branch: &str, trust: workspace::Trust) -> Result<Prepared> {
+    valid_branch(branch)?;
+    let local = format!("refs/heads/{branch}");
+    git_as(root, &["rev-parse", "--verify", "--quiet", &local], GIT, trust)
+        .map_err(|_| format!("The branch {branch} is no longer on this computer. Choose another branch."))?;
+    Ok((branch.to_owned(), Some(worktree_from(root, &local, trust)?), None, None))
 }
 
 /// The branch, any worktree already made, a fallback note, and the main checkout's
@@ -1105,6 +1109,27 @@ mod tests {
         let base = std::env::temp_dir().join(format!("pandacode-start-{label}-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&base).unwrap();
         base.canonicalize().unwrap()
+    }
+
+    #[test]
+    fn a_selected_project_branch_keeps_unpushed_commits_even_when_origin_has_the_same_name() {
+        let root = temp_base("local-branch");
+        git_in(&root, &["init", "-q", "-b", "feature"]);
+        std::fs::write(root.join("code.txt"), "origin version").unwrap();
+        git_in(&root, &["add", "."]);
+        git_in(&root, &["commit", "-q", "-m", "origin"]);
+        git_in(&root, &["update-ref", "refs/remotes/origin/feature", "HEAD"]);
+        git_in(&root, &["remote", "add", "origin", "https://example.invalid/no-fetch.git"]);
+        std::fs::write(root.join("code.txt"), "unpushed version").unwrap();
+        git_in(&root, &["commit", "-q", "-am", "unpushed"]);
+        let (_, made, _, _) = project_branch_worktree(&root, "feature", workspace::Trust::Desktop).unwrap();
+        let made = made.unwrap();
+        assert_eq!(std::fs::read_to_string(made.path.join("code.txt")).unwrap(), "unpushed version");
+        assert_eq!(git(&made.path, &["rev-parse", "HEAD"], GIT).unwrap(), git(&root, &["rev-parse", "feature"], GIT).unwrap());
+        assert!(project_branch_worktree(&root, "missing", workspace::Trust::Desktop).is_err(), "no silent fallback");
+        // No origin/HEAD exists, and the configured origin is unreachable: neither is needed.
+        std::fs::remove_dir_all(made.path).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

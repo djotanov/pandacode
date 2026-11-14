@@ -324,8 +324,10 @@ export function createFileTabs(deps: Deps) {
       pane.focus({ preventScroll: true });
     },
     /** Re-reads the file on screen, e.g. after an agent run may have changed it. */
-    reload(): void {
+    reload(force = false): void {
       const entry = thread(), tab = current(); if (!entry || !tab || tab.saving || dirty(tab)) return;
+      // Routine polling uses the cheap fixed stamp. Explicit refresh and run completion read again.
+      if (force && deps.remoteName?.(tab.context)) { void load(tab); return; }
       const path = tab.path;
       void deps.call<string>('workspace_file_stamp', { ...tab.context, path: tab.path }).then(stamp => {
         if (entry.tabs.includes(tab) && tab.path === path && stamp !== tab.stamp) void load(tab);

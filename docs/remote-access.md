@@ -65,7 +65,7 @@ of shown computers is `browsed` in `remote.json`.
   `Store::all_projects()` (the `list_projects` command) and `Store::project_entry()` include
   them. Hosting is unaffected: a host's `tasks.list` and `task.start` see only its own projects.
 - **Listing.** Showing a computer calls its `tasks.list` (its 200 most recent tasks, so a busy computer never crowds this one's own out of the sidebar's 500) at once, and again beside
-  each subscribe round (at most every 30 s per computer) while it is online. `browse::apply`
+  each subscribe round (at most every 30 s per computer) while it is online. A dedicated 30-second socket timer schedules discovery even when presence stays unchanged. `browse::apply`
   makes or renames its projects (bot workspaces and chats are left out) and makes a mirror for
   each task not yet mirrored here (matched by `(remote_device, remote_session)`, so a task this
   computer started keeps its row); a task already settled there, or a harness or mode this build doesn't know, leaves the task out.
@@ -76,8 +76,9 @@ of shown computers is `browsed` in `remote.json`.
   status, cards and live events follow the host as usual, but no messages are copied (not in a
   subscribe catch-up, a reconnect's pipelined pages, or a run end), so showing a computer with
   hundreds of tasks copies no histories. Opening the thread (`get_messages` without `beforeId`)
-  clears the flag and syncs it (newest page first, then the backfill). Until then a listing
-  keeps its title and stage in step with the host.
+  clears the flag and syncs it (newest page first, then the backfill). Listings keep title, stage, archived state and pin in step with the host even after opening;
+  `remote_deferred` only controls message downloads. Offline local metadata changes are not
+  queued and can be replaced by the next host listing.
 - **Starting.** `remote_start_task` for a remote project sends `projectId` (the host's id)
   instead of `repo`, so no local checkout or GitHub origin is needed, and a project of another
   computer is refused. The window skips `remote_repo_check` and its "GitHub is behind" dialog.
@@ -88,6 +89,8 @@ of shown computers is `browsed` in `remote.json`.
   `host.hello` for the `projectCheckout` feature (kept 10 minutes per computer,
   `browse::require_project_checkout`) and refuses such a start on an older host ("<computer> runs
   an older PandaCode … Update PandaCode on <computer>, or choose Runs in → New worktree.").
+  An explicitly selected worktree branch uses its local `refs/heads/` ref, including unpushed
+  commits, without fetching. A removed branch is refused rather than silently replaced.
   On the host, a `projectId` start whose folder has no `.git` (here or above) runs in place,
   never in a worktree, while no other agent works there; a checkout without `origin` fetches
   nothing and uses its own branches (the viewer's branch when it has it, else the one checked
@@ -109,6 +112,9 @@ of shown computers is `browsed` in `remote.json`.
   projects in menus (`On <computer> · Offline`); one missing from presence is not marked.
 - **Open project.** A computer being shown has Refresh (lists it again now; the dialog stays)
   and Stop showing; while a computer is asked, its row is `aria-busy` and says so.
+  Stop showing validates all task copies before deleting any; if work is active, it refuses
+  without changing the rows or the saved browsing preference. Listings and hide/show are
+  serialized per computer so an earlier reply cannot restore removed rows.
 - **Rename and pin.** `update_session` and `pin_session` send `thread.rename` and `thread.pin` to the host before changing the mirror. A refusal leaves the copy unchanged. Offline changes affect only this copy and are not queued.
 - **Settle and reopen.** Changing a mirror's stage (`set_task_stage`) sends `thread.setStage` to
   its host first (`mirror::set_stage`), so a task settled here is settled there; the host's
@@ -119,8 +125,9 @@ of shown computers is `browsed` in `remote.json`.
 File @-mentions use `files.search` on the host: the task's checkout (including its worktree)
 for an existing mirror, or the project folder for a New task. Remote file tabs say
 "Read only · on <computer>" and offer no editor, save or attach action. The explorer only
-copies relative paths. File stamps are fixed so polling does not re-read files over the relay;
-close and reopen a file to read it again.
+copies relative paths. File stamps are fixed so routine polling does not re-read files over
+  the relay; Refresh and completed runs force a fresh read of the open remote file. Every
+  page must carry the same content hash; a concurrent edit is reported instead of mixing versions.
 
 The Changes and Files views of a mirror (any task that runs on another computer, in a remote
 project or not) show its host's checkout, for review only (`src-tauri/src/remote/inspect.rs`).

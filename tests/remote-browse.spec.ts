@@ -299,3 +299,17 @@ test('a computer that can’t list its branches says why', async ({ page }) => {
   await page.getByRole('menuitemradio', { name: 'From the default branch' }).click();
   await expect(page.getByText('Update PandaCode there to choose one.', { exact: false }).first()).toBeVisible();
 });
+
+
+test('refresh reads an open remote file again even though its polling stamp is fixed', async ({ page }) => {
+  await signIn(page);
+  await showNas(page);
+  await remoteTask(page).click();
+  await openInspectorTab(page, 'tab-files');
+  await page.evaluate(() => { (window as any).__remoteFileText = '# Before the remote edit'; });
+  await page.locator('#inspector-content .file-row > button:first-child[data-path="README.md"]').click();
+  await expect(page.locator('#file-view .doc-reader')).toContainText('Before the remote edit');
+  await page.evaluate(() => { (window as any).__remoteFileText = '# After the remote edit'; });
+  await page.locator('#inspector-refresh').click();
+  await expect(page.locator('#file-view .doc-reader')).toContainText('After the remote edit');
+});

@@ -5798,7 +5798,7 @@ async function refreshInspector(): Promise<void> {
   state.files = results[1].status === 'fulfilled' ? results[1].value : [];
   state.jj = results[2].status === 'fulfilled' ? results[2].value : null;
   state.filesError = results[1].status === 'rejected' ? errorText(results[1].reason) || 'The folder could not be read.' : '';
-  renderInspector(); renderHeader(); fileTabs.reload();
+  renderInspector(); renderHeader(); fileTabs.reload(true);
 }
 /** The simulator panel stays mounted once opened; hiding it stops its frames. */
 function syncSimulatorPanel(): void {
