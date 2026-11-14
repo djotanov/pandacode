@@ -100,6 +100,19 @@ of shown computers is `browsed` in `remote.json`.
   folder, or New worktree, sent as `worktree: true`; `remoteWorktrees` in `main.ts`), and menus show the project as "On <computer>". A send
   that would run such a task here (a board task, say) is refused.
 
+- **Sidebar.** With another computer's projects shown, the project filter also lists
+  Computers (This computer, then each shown one): choosing one narrows the sidebar to tasks that
+  run there (`state.computerFilter`, saved as `pandacode.computerFilter`; a mirror's computer is
+  its host, else its project's, else this one) and asks a shown computer for its list again at
+  once. Choosing a project clears it. A computer presence lists as offline (or this computer
+  without the relay) marks its tasks' rows (`Runs on <computer> · Offline`, dimmed) and its
+  projects in menus (`On <computer> · Offline`); one missing from presence is not marked.
+- **Open project.** A computer being shown has Refresh (lists it again now; the dialog stays)
+  and Stop showing; while a computer is asked, its row is `aria-busy` and says so.
+- **Settle and reopen.** Changing a mirror's stage (`set_task_stage`) sends `thread.setStage` to
+  its host first (`mirror::set_stage`), so a task settled here is settled there; the host's
+  refusal is shown and nothing changes, and a host that is offline changes only this copy.
+
 ## Remote inspector
 
 The Changes and Files views of a mirror (any task that runs on another computer, in a remote

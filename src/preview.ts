@@ -1604,6 +1604,8 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
       emit('sessions-changed', {});
       return { projects: 0, tasks: 0 } as T;
     }
+    // `__remoteBrowseHold` keeps the next show waiting until `__remoteBrowseRelease()`.
+    if (w.__remoteBrowseHold) await new Promise<void>(resolve => { w.__remoteBrowseRelease = () => { w.__remoteBrowseHold = false; resolve(); }; });
     if (w.__remoteBrowseFail) { const failure = w.__remoteBrowseFail; w.__remoteBrowseFail = undefined; throw new Error(failure); }
     const targets = await invokeRemote<{ deviceId: string; name: string; online: boolean }[]>('remote_targets', {}, emit);
     const target = targets.find(item => item.deviceId === deviceId);
@@ -2159,6 +2161,13 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
     }
     case 'set_task_stage': {
       const s = session(args.sessionId); assertIdle(s);
+      // A task on another computer is settled or reopened there too (`thread.setStage`, remote/mirror.rs).
+      // `__remoteStageFail` is the host's refusal for the next one; an offline host changes only this copy.
+      if (s.remoteDevice) {
+        const w = window as any;
+        if (w.__remoteStageFail) { const failure = w.__remoteStageFail; w.__remoteStageFail = undefined; throw new Error(failure); }
+        (w.__remoteStages ??= []).push({ sessionId: s.id, deviceId: s.remoteDevice.id, stage: args.stage });
+      }
       if (s.archived) throw new Error('Restore this task before changing its stage.');
       const stage = args.stage as TaskStage;
       // Like the native store: work in progress only by undoing the completion of a stopped run.

@@ -998,6 +998,8 @@ async fn set_task_stage(
     session_id: String,
     stage: String,
 ) -> Result<Session> {
+    // A task on another computer is settled (or reopened) there too.
+    remote::mirror::set_stage(&app, &state, &session_id, &stage).await?;
     let task = {
         let agents = lock_agents(&state.agents).map_err(|e| e.to_string())?;
         if agents.contains_key(&session_id) {

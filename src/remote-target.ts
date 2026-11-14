@@ -53,9 +53,9 @@ export function computersSection(targets: RemoteTarget[], browsed: string[]): st
   if (!targets.length) return '';
   const rows = [...targets].sort((a, b) => Number(b.online) - Number(a.online)).map(target => {
     const shown = browsed.includes(target.deviceId), name = escape(target.name);
-    const detail = shown ? 'Its projects are in the sidebar' : target.online ? 'Start tasks in its projects from here' : offlineText(target);
+    const detail = shown ? (target.online ? 'Its projects are in the sidebar' : `Its projects are in the sidebar · ${offlineText(target)}`) : target.online ? 'Start tasks in its projects from here' : offlineText(target);
     const action = shown
-      ? `<button type="button" class="secondary-button" data-action="browse-computer" data-device="${escape(target.deviceId)}" data-show="false" aria-label="Stop showing ${name}">Stop showing</button>`
+      ? `<button type="button" class="secondary-button" data-action="browse-computer" data-device="${escape(target.deviceId)}" data-show="true" data-refresh="true" aria-label="Refresh ${name}" ${target.online ? '' : 'disabled'}>Refresh</button><button type="button" class="secondary-button" data-action="browse-computer" data-device="${escape(target.deviceId)}" data-show="false" aria-label="Stop showing ${name}">Stop showing</button>`
       : `<button type="button" class="secondary-button" data-action="browse-computer" data-device="${escape(target.deviceId)}" data-show="true" aria-label="Show projects on ${name}" ${target.online ? '' : 'disabled'}>Show projects</button>`;
     return `<li class="open-project-computer">${toned(icon('monitor'), target.online ? 'remote' : '')}<span class="open-project-computer-label"><strong>${name}</strong><small>${escape(detail)}</small></span>${action}</li>`;
   }).join('');

@@ -84,6 +84,16 @@ pub(crate) async fn route(app: &tauri::AppHandle, state: &AppState, local: &str,
     result.map(Some)
 }
 
+/// Settling or reopening a mirror does the same on its host (`thread.setStage`), so the task is
+/// finished everywhere; a host that is offline leaves only this copy changed. Nothing for a
+/// local task.
+pub(crate) async fn set_stage(app: &tauri::AppHandle, state: &AppState, local: &str, stage: &str) -> Result<()> {
+    match route(app, state, local, "thread.setStage", json!({"stage": stage})).await {
+        Err(error) if error == super::socket::OFFLINE => Ok(()),
+        result => result.map(drop),
+    }
+}
+
 /// A prompt for a mirror: its images (this computer's captures) go to the host first, then
 /// the message names the ids the host stored them under.
 pub(crate) async fn send(app: &tauri::AppHandle, state: &AppState, local: &str, text: String, image_ids: &[String]) -> Result<()> {

@@ -25,7 +25,7 @@ async function showNas(page: Page) {
   await expect(computers.getByRole('button', { name: 'Show projects on Old laptop' })).toBeDisabled();
   await computers.getByRole('button', { name: 'Show projects on Home NAS' }).click();
   await expect(dialog).toBeHidden();
-  await expect(page.getByText('Showing 2 projects from Home NAS')).toBeVisible();
+  await expect(page.getByText('Showing 2 projects and 1 task from Home NAS')).toBeVisible();
 }
 const remoteTask = (page: Page) => page.locator('#navigation .task-item').filter({ hasText: 'Fix the flaky upload test' });
 
@@ -117,6 +117,86 @@ test('a computer that can’t be reached is reported, and nothing is shown', asy
   await expect(page.getByText('That computer is offline.')).toBeVisible();
   await expect(dialog).toBeVisible();
   await expect(remoteTask(page)).toHaveCount(0);
+});
+
+test('the project filter narrows the sidebar to one computer, and choosing it refreshes that computer', async ({ page }) => {
+  await signIn(page);
+  await showNas(page);
+  const local = page.locator('#navigation .task-item').filter({ hasNotText: 'Fix the flaky upload test' });
+  await page.getByRole('button', { name: 'Filter projects' }).click();
+  await page.getByRole('menuitemradio', { name: 'Home NAS' }).click();
+  await expect(page.getByRole('button', { name: 'Filter projects' })).toContainText('Home NAS');
+  await expect(remoteTask(page)).toHaveCount(1);
+  await expect(local).toHaveCount(0);
+  // Choosing the computer asked it for its list again, quietly.
+  await expect.poll(() => page.evaluate(() => (window as any).__remoteBrowses.length)).toBe(2);
+  expect(await page.evaluate(() => (window as any).__remoteBrowses[1])).toEqual({ deviceId: 'dev-nas', show: true });
+  // This computer: only its own tasks, and only its own projects in the menu.
+  await page.getByRole('button', { name: 'Filter projects' }).click();
+  await page.getByRole('menuitemradio', { name: 'This computer' }).click();
+  await expect(page.getByRole('button', { name: 'Filter projects' })).toContainText('This computer');
+  await expect(remoteTask(page)).toHaveCount(0);
+  await expect(local.first()).toBeVisible();
+  await page.getByRole('button', { name: 'Filter projects' }).click();
+  await expect(page.getByRole('menuitemradio', { name: /atlas/ })).toHaveCount(0);
+  await page.getByRole('menuitemradio', { name: 'All projects' }).click();
+  await expect(remoteTask(page)).toHaveCount(1);
+});
+
+test('a computer out of reach marks its tasks and projects offline', async ({ page }) => {
+  await signIn(page);
+  // The preview can take Studio iMac offline (`__remoteOnline`).
+  await page.getByRole('button', { name: 'Open project' }).click();
+  await page.getByRole('dialog', { name: 'Open project' }).getByRole('button', { name: 'Show projects on Studio iMac' }).click();
+  const studioTask = page.locator('#navigation .task-item').filter({ hasText: 'Fix the flaky upload test' });
+  await expect(studioTask.locator('.task-remote')).toHaveAttribute('aria-label', 'Runs on Studio iMac');
+  await page.evaluate(() => (window as any).__remoteOnline('dev-studio', false));
+  await expect(studioTask.locator('.task-remote')).toHaveAttribute('aria-label', 'Runs on Studio iMac · Offline');
+  await expect(studioTask.locator('.task-remote')).toHaveClass(/is-offline/);
+  await page.getByRole('button', { name: 'Filter projects' }).click();
+  await expect(page.getByRole('menuitemradio', { name: /atlas/ })).toContainText('On Studio iMac · Offline');
+  await expect(page.getByRole('menuitemradio', { name: 'Studio iMac' })).toContainText('Offline');
+  await page.keyboard.press('Escape');
+  await page.evaluate(() => (window as any).__remoteOnline('dev-studio', true));
+  await expect(studioTask.locator('.task-remote')).toHaveAttribute('aria-label', 'Runs on Studio iMac');
+});
+
+test('showing a computer says it is loading, and a shown computer can be refreshed', async ({ page }) => {
+  await signIn(page);
+  await page.evaluate(() => { (window as any).__remoteBrowseHold = true; });
+  await page.getByRole('button', { name: 'Open project' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Open project' });
+  const nas = dialog.getByRole('listitem').filter({ hasText: 'Home NAS' });
+  await nas.getByRole('button', { name: 'Show projects on Home NAS' }).click();
+  await expect(nas).toHaveAttribute('aria-busy', 'true');
+  await expect(nas).toContainText('Asking Home NAS for its projects…');
+  await expect(nas.getByRole('button', { name: 'Show projects on Home NAS' })).toHaveText('Loading…');
+  await page.evaluate(() => (window as any).__remoteBrowseRelease());
+  await expect(dialog).toBeHidden();
+  await expect(page.getByText('Showing 2 projects and 1 task from Home NAS')).toBeVisible();
+  // Refresh asks again and keeps the dialog open.
+  await page.getByRole('button', { name: 'Open project' }).click();
+  await page.getByRole('dialog', { name: 'Open project' }).getByRole('button', { name: 'Refresh Home NAS' }).click();
+  await expect.poll(() => page.evaluate(() => (window as any).__remoteBrowses.length)).toBe(2);
+  await expect(page.getByRole('dialog', { name: 'Open project' }).getByRole('button', { name: 'Refresh Home NAS' })).toBeEnabled();
+});
+
+test('settling a task from another computer settles it there too', async ({ page }) => {
+  await signIn(page);
+  await showNas(page);
+  await remoteTask(page).hover();
+  await remoteTask(page).locator('xpath=..').getByRole('button', { name: /^Settle: Fix the flaky upload test/ }).click();
+  await expect.poll(() => page.evaluate(() => (window as any).__remoteStages ?? [])).toEqual([{ sessionId: 'remote-dev-nas-task-1', deviceId: 'dev-nas', stage: 'completed' }]);
+});
+
+test('a host that refuses a settle leaves the task as it was', async ({ page }) => {
+  await signIn(page);
+  await showNas(page);
+  await page.evaluate(() => { (window as any).__remoteStageFail = 'Turn on Full access for remote tasks on that computer to settle this task.'; });
+  await remoteTask(page).hover();
+  await remoteTask(page).locator('xpath=..').getByRole('button', { name: /^Settle: Fix the flaky upload test/ }).click();
+  await expect(page.getByText('Turn on Full access for remote tasks on that computer to settle this task.')).toBeVisible();
+  await expect(remoteTask(page).locator('xpath=..').getByRole('button', { name: /^Settle: Fix the flaky upload test/ })).toBeAttached();
 });
 
 test('a computer on an older PandaCode is not asked to run a task in its project folder', async ({ page }) => {
