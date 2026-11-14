@@ -188,33 +188,47 @@ pub(crate) fn older_host(name: &str) -> String {
     format!("{name} runs an older PandaCode, which would start this task in a new worktree instead of the project folder. Update PandaCode on {name}, or choose Runs in → New worktree.")
 }
 
-/// Refuses a start in a remote project's folder (`checkout: "current"`) on a host that would
-/// ignore it, so the task never lands in a worktree unasked. Each host's answer is kept for
-/// [`HELLO_FOR`]; a failed ask is not kept (the start then fails as it would anyway).
-pub(crate) async fn require_project_checkout(app: &tauri::AppHandle, device: &str) -> Result<()> {
+/// Whether `device` runs projects by id (`projectCheckout`: a project folder as it is, and
+/// `git.branches` by project). Each host's answer is kept for [`HELLO_FOR`]; a failed ask is not
+/// kept and fails the caller (offline or a lost reply says nothing about the host's version).
+pub(crate) async fn takes_projects(app: &tauri::AppHandle, device: &str) -> Result<bool> {
     static KNOWN: OnceLock<Mutex<HashMap<String, (bool, Instant)>>> = OnceLock::new();
     let known = KNOWN.get_or_init(Default::default);
-    let cached = known.lock().unwrap_or_else(|e| e.into_inner()).get(device).filter(|(_, at)| at.elapsed() < HELLO_FOR).map(|(takes, _)| *takes);
-    let takes = match cached {
-        Some(takes) => takes,
-        None => {
-            let hello = client::call(app, device, "host.hello", json!({})).await;
-            // Offline or a lost reply: not an answer about the host's version.
-            if let Err(error) = &hello {
-                if error != "Unknown method." && !error.contains("not allowed") && !error.contains("Unknown remote method") {
-                    return Err(error.clone());
-                }
-            }
-            let takes = takes_project_checkout(&hello);
-            known.lock().unwrap_or_else(|e| e.into_inner()).insert(device.to_owned(), (takes, Instant::now()));
-            takes
+    if let Some(takes) = known.lock().unwrap_or_else(|e| e.into_inner()).get(device).filter(|(_, at)| at.elapsed() < HELLO_FOR).map(|(takes, _)| *takes) {
+        return Ok(takes);
+    }
+    let hello = client::call(app, device, "host.hello", json!({})).await;
+    if let Err(error) = &hello {
+        if error != "Unknown method." && !error.contains("not allowed") && !error.contains("Unknown remote method") {
+            return Err(error.clone());
         }
-    };
-    if takes {
+    }
+    let takes = takes_project_checkout(&hello);
+    known.lock().unwrap_or_else(|e| e.into_inner()).insert(device.to_owned(), (takes, Instant::now()));
+    Ok(takes)
+}
+
+/// Refuses a start in a remote project's folder (`checkout: "current"`) on a host that would
+/// ignore it, so the task never lands in a worktree unasked.
+pub(crate) async fn require_project_checkout(app: &tauri::AppHandle, device: &str) -> Result<()> {
+    if takes_projects(app, device).await? {
         Ok(())
     } else {
         Err(older_host(&super::device_label(device)))
     }
+}
+
+/// A remote project's branches on its computer (`git.branches` by project id), for the branch
+/// a New worktree there starts from: `{ current, branches, defaultBranch }`.
+#[tauri::command]
+pub async fn remote_project_branches(app: tauri::AppHandle, project_id: String) -> Result<Value> {
+    let project = app.state::<AppState>().store.lock().map_err(|e| e.to_string())?.project_entry(&project_id)?;
+    let (Some(device), Some(remote_project)) = (project.remote_device, project.remote_project) else { return Err("That project is on this computer.".into()) };
+    if !takes_projects(&app, &device.id).await? {
+        return Err(format!("{} runs an older PandaCode, which can't list a project's branches. Update PandaCode there to choose one.", device.name));
+    }
+    let reply = client::call(&app, &device.id, "git.branches", json!({"projectId": remote_project})).await?;
+    Ok(json!({"current": reply["current"], "branches": reply["branches"], "defaultBranch": reply["defaultBranch"]}))
 }
 
 /// Whether a mirror's messages wait for it to be opened.

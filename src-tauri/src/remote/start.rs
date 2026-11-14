@@ -729,7 +729,7 @@ pub(crate) async fn run_cancellable(app: &tauri::AppHandle, from: &str, start: S
 /// An untrusted phone (Full access off) is refused before the first Git call when the
 /// checkout's own config could run a program ([`workspace::refuse_untrusted_programs`]).
 #[allow(clippy::too_many_arguments)]
-fn prepare(state: &AppState, project: &Project, cloned: bool, worktree: bool, wanted: Option<&str>, progress: &Progress, cancel: &Cancel, trust: workspace::Trust) -> Result<Prepared> {
+fn prepare(state: &AppState, project: &Project, cloned: bool, worktree: bool, wanted: Option<&str>, local_branch_ok: bool, progress: &Progress, cancel: &Cancel, trust: workspace::Trust) -> Result<Prepared> {
     check(cancel)?;
     progress.report("preparing", None, None);
     let root = PathBuf::from(&project.path);
@@ -757,7 +757,16 @@ fn prepare(state: &AppState, project: &Project, cloned: bool, worktree: bool, wa
             }
             return Ok((branch, None, None, reserved));
         }
-        (true, false) => None,
+        // A project named by id (a remote project's New worktree): the branch the viewer chose
+        // from this checkout's list may exist only here; the worktree starts from it.
+        (true, false) => {
+            if let Some(wanted) = wanted.filter(|wanted| local_branch_ok && *wanted != branch && valid_branch(wanted).is_ok()) {
+                if git_as(&root, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{wanted}")], GIT, trust).is_ok() {
+                    return Ok((wanted.to_owned(), Some(worktree_from(&root, wanted, trust)?), None, None));
+                }
+            }
+            None
+        }
     };
     Ok((branch, made, None, None))
 }
@@ -837,7 +846,7 @@ async fn start_claimed(app: &tauri::AppHandle, from: &str, start: Start, progres
         let prepared = if current && !cloned {
             reporter.report("preparing", None, None);
             prepare_current(&project, trust)
-        } else { prepare(&state, &project, cloned, worktree, wanted.as_deref(), &reporter, &flag, trust) };
+        } else { prepare(&state, &project, cloned, worktree, wanted.as_deref(), matches!(target, Target::ProjectId(_)), &reporter, &flag, trust) };
         if cloned && worktree && prepared.is_err() {
             let _ = restore_checkout(Path::new(&project.path), trust);
         }

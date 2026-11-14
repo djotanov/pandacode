@@ -84,14 +84,19 @@ pub(crate) async fn route(app: &tauri::AppHandle, state: &AppState, local: &str,
     result.map(Some)
 }
 
-/// Settling or reopening a mirror does the same on its host (`thread.setStage`), so the task is
-/// finished everywhere; a host that is offline leaves only this copy changed. Nothing for a
-/// local task.
-pub(crate) async fn set_stage(app: &tauri::AppHandle, state: &AppState, local: &str, stage: &str) -> Result<()> {
-    match route(app, state, local, "thread.setStage", json!({"stage": stage})).await {
+/// A change to a mirror that its host makes too (`method`), so the task is the same everywhere:
+/// the host's refusal stops it, and a host that is offline leaves only this copy changed.
+/// Nothing for a local task.
+pub(crate) async fn change_on_host(app: &tauri::AppHandle, state: &AppState, local: &str, method: &str, params: Value) -> Result<()> {
+    match route(app, state, local, method, params).await {
         Err(error) if error == super::socket::OFFLINE => Ok(()),
         result => result.map(drop),
     }
+}
+
+/// Settling or reopening a mirror does the same on its host (`thread.setStage`).
+pub(crate) async fn set_stage(app: &tauri::AppHandle, state: &AppState, local: &str, stage: &str) -> Result<()> {
+    change_on_host(app, state, local, "thread.setStage", json!({"stage": stage})).await
 }
 
 /// A prompt for a mirror: its images (this computer's captures) go to the host first, then

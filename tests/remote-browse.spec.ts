@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
+import { openInspectorTab } from './inspector-tab-helper';
 
 /* Another computer's projects and tasks, shown here (remote/browse.rs; the preview mocks
  * `remote_browse` in src/preview.ts): Open project lists your other computers, a shown
@@ -216,4 +217,85 @@ test('a computer on an older PandaCode is not asked to run a task in its project
   await page.getByRole('textbox', { name: 'Message your coding agent' }).fill('Fix it in a worktree');
   await page.getByRole('textbox', { name: 'Message your coding agent' }).press('Enter');
   await expect.poll(() => page.evaluate(() => (window as any).__remoteStarts?.length ?? 0)).toBe(1);
+});
+
+const rowMenu = (page: Page) => page.getByRole('dialog', { name: 'Task actions', exact: true });
+async function openAtlasDraft(page: Page) {
+  await page.getByRole('button', { name: 'Filter projects' }).click();
+  await page.getByRole('menuitemradio', { name: /atlas/ }).click();
+  await page.locator('.new-task-button').click();
+}
+
+test('@-mentions in another computer’s project search its files there', async ({ page }) => {
+  await signIn(page);
+  await showNas(page);
+  await openAtlasDraft(page);
+  await page.getByRole('textbox', { name: 'Message your coding agent' }).pressSequentially('Look at @sea');
+  await expect.poll(() => page.evaluate(() => ((window as any).__remoteSearches ?? []).map((call: { projectId: string }) => call.projectId))).toContain('remote-dev-nas-atlas');
+});
+
+test('a remote task’s files open read only, with nothing to save, edit or open here', async ({ page }) => {
+  await signIn(page);
+  await showNas(page);
+  await remoteTask(page).click();
+  await openInspectorTab(page, 'tab-files');
+  const readme = page.locator('#inspector-content .file-row > button:first-child[data-path="README.md"]');
+  // Another computer's file can't be read here to attach.
+  await expect(page.locator('#inspector-content [data-action="attach-file"]')).toHaveCount(0);
+  // The explorer's menu only copies the project-relative path.
+  await readme.click({ button: 'right' });
+  const actions = page.getByRole('dialog', { name: 'README.md' });
+  await expect(actions.getByRole('menuitem')).toHaveCount(1);
+  await expect(actions.getByRole('menuitem', { name: 'Copy Path' })).toBeVisible();
+  await page.keyboard.press('Escape');
+  await readme.click();
+  const view = page.locator('#file-view');
+  await expect(view.locator('.file-view-remote')).toHaveText('Read only · on Home NAS');
+  await expect(view.locator('[data-file-tab="save"], [data-file-tab="edit"], [data-file-tab="attach"]')).toHaveCount(0);
+});
+
+test('renaming and pinning a task from another computer does it there too', async ({ page }) => {
+  await signIn(page);
+  await showNas(page);
+  await remoteTask(page).click({ button: 'right' });
+  await rowMenu(page).getByRole('menuitem', { name: 'Pin task', exact: true }).click();
+  await expect.poll(() => page.evaluate(() => (window as any).__remoteChanges ?? [])).toEqual([{ method: 'thread.pin', sessionId: 'remote-dev-nas-task-1', pinned: true }]);
+  await page.locator('#navigation .task-item').filter({ hasText: 'Fix the flaky upload test' }).click({ button: 'right' });
+  await rowMenu(page).getByRole('menuitem', { name: 'Rename…', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Rename task', exact: true });
+  await dialog.getByRole('textbox', { name: 'Task name', exact: true }).fill('Upload retries');
+  await dialog.getByRole('button', { name: 'Save', exact: true }).click();
+  await expect.poll(() => page.evaluate(() => ((window as any).__remoteChanges ?? []).at(-1))).toEqual({ method: 'thread.rename', sessionId: 'remote-dev-nas-task-1', title: 'Upload retries' });
+});
+
+test('a New worktree in another computer’s project can start from one of its branches', async ({ page }) => {
+  await signIn(page);
+  await showNas(page);
+  await openAtlasDraft(page);
+  const checkout = page.locator('#remote-checkout');
+  await checkout.click();
+  await page.getByRole('menuitemradio', { name: 'New worktree' }).click();
+  await checkout.click();
+  await page.getByRole('menuitemradio', { name: 'From the default branch' }).click();
+  const branches = page.getByRole('dialog', { name: 'Branches on Home NAS' });
+  await expect(branches.getByRole('menuitemradio', { name: 'feat/upload-retry' })).toContainText('Checked out there');
+  await branches.getByRole('menuitemradio', { name: 'release/2.4' }).click();
+  await expect(checkout).toHaveAccessibleName('Checkout: New worktree from release/2.4 on Home NAS');
+  await page.getByRole('textbox', { name: 'Message your coding agent' }).fill('Backport the retry');
+  await page.getByRole('textbox', { name: 'Message your coding agent' }).press('Enter');
+  await expect.poll(() => page.evaluate(() => (window as any).__remoteStarts?.length ?? 0)).toBe(1);
+  expect(await page.evaluate(() => (window as any).__remoteStarts[0])).toMatchObject({ projectId: 'remote-dev-nas-atlas', worktree: true, branch: 'release/2.4' });
+});
+
+test('a computer that can’t list its branches says why', async ({ page }) => {
+  await signIn(page);
+  await showNas(page);
+  await openAtlasDraft(page);
+  await page.evaluate(() => { (window as any).__remoteBranchesFail = 'Home NAS runs an older PandaCode, which can’t list a project’s branches. Update PandaCode there to choose one.'; });
+  const checkout = page.locator('#remote-checkout');
+  await checkout.click();
+  await page.getByRole('menuitemradio', { name: 'New worktree' }).click();
+  await checkout.click();
+  await page.getByRole('menuitemradio', { name: 'From the default branch' }).click();
+  await expect(page.getByText('Update PandaCode there to choose one.', { exact: false }).first()).toBeVisible();
 });

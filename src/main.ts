@@ -673,8 +673,10 @@ const searchPanel = createSearchPanel({
 });
 const fileTabs = createFileTabs({
   call,
-  canAttach: context => Boolean(state.sessionId) && context.sessionId === state.sessionId,
+  // A file on another computer can't be read here to attach; @-mention it instead.
+  canAttach: context => Boolean(state.sessionId) && context.sessionId === state.sessionId && !contextRemote(context),
   attach: path => attachFile(path),
+  remoteName: context => contextRemote(context),
   preview: (path, context) => previewFile(path, context),
   notify: text => notify(text),
   report: error => report(error),
@@ -716,6 +718,7 @@ const fileExplorer = createFileExplorer({
   hasChanges: (context, path) => fileTabs.hasChanges(context, path),
   refresh: async () => { fileTabs.reload(); await refreshExplorerFiles(); },
   notify, report,
+  remoteName: context => contextRemote(context),
 });
 document.querySelector<HTMLElement>('#inspector-content')!.addEventListener('contextmenu', event => {
   const anchor = (event.target as Element).closest('.file-row')?.querySelector<HTMLElement>('button[data-path]');
@@ -778,6 +781,7 @@ const worktrees = createWorktrees({
   session, project,
   git: () => state.git, gitError: () => state.gitError,
   remoteWorktree: task => remoteWorktrees.has(task.id),
+  remoteBranch: task => remoteBranches.get(task.id),
   draft: () => document.querySelector<HTMLTextAreaElement>('#prompt')?.value ?? '',
   attachable: () => newTaskView(),
   computer: (task, fresh) => computerControl(task, fresh, remoteTargets, remoteChoice, cloudTargets, remoteChoiceName, projectRemote(task.projectId)) + botTaskControl(task, fresh),
@@ -6036,9 +6040,11 @@ function showChangesView(target: HTMLElement, key: string): void {
 }
 /** Files tab rows, VS Code style: open folders list their children inline, indented by depth. */
 function fileTree(files: FileEntry[], depth: number): string {
+  // Another computer's files can't be read here to attach; they are @-mentioned instead.
+  const remoteFiles = Boolean(contextRemote(workspaceContext()));
   return files.map(file => {
     const open = file.isDir && state.openFolders.has(file.path), path = escape(file.path);
-    const row = `<div class="file-row" data-id="file:${path}" style="--depth:${depth}"><button data-action="${file.isDir ? 'toggle-file-folder' : 'open-file'}" data-path="${path}"${file.isDir ? ` aria-expanded="${open}"` : ''}>${file.isDir ? icon('chevron', 'file-twisty') : '<span class="file-twisty"></span>'}${fileIcon(file.name, file.isDir)}<span>${escape(file.name)}</span></button>${!file.isDir && /\.svg$/i.test(file.path) ? button('view-source', 'View source of ' + file.name, 'file', 'file-attach', `data-path="${path}"`) : ''}${!file.isDir ? button('attach-file', 'Attach ' + file.name, 'plus', 'file-attach', `data-path="${path}"`) : ''}${button('file-menu', 'Actions for ' + file.name, 'more', 'file-attach', `data-path="${path}" data-directory="${file.isDir}" aria-haspopup="menu"`)}</div>`;
+    const row = `<div class="file-row" data-id="file:${path}" style="--depth:${depth}"><button data-action="${file.isDir ? 'toggle-file-folder' : 'open-file'}" data-path="${path}"${file.isDir ? ` aria-expanded="${open}"` : ''}>${file.isDir ? icon('chevron', 'file-twisty') : '<span class="file-twisty"></span>'}${fileIcon(file.name, file.isDir)}<span>${escape(file.name)}</span></button>${!file.isDir && /\.svg$/i.test(file.path) ? button('view-source', 'View source of ' + file.name, 'file', 'file-attach', `data-path="${path}"`) : ''}${!file.isDir && !remoteFiles ? button('attach-file', 'Attach ' + file.name, 'plus', 'file-attach', `data-path="${path}"`) : ''}${button('file-menu', 'Actions for ' + file.name, 'more', 'file-attach', `data-path="${path}" data-directory="${file.isDir}" aria-haspopup="menu"`)}</div>`;
     return row + (open ? fileTree(state.folderFiles.get(file.path) ?? [], depth + 1) : '');
   }).join('');
 }
@@ -7319,19 +7325,46 @@ let pairingPrompt: (() => void) | undefined, pairingLoading = false;
 const remoteChecks = new Set<string>(), remoteStartCancels = new Set<string>(), remoteRetries = new Set<string>(), remoteRetryErrors = new Map<string, string>();
 /** New tasks in another computer's project that start in a new worktree there (the Checkout menu). */
 const remoteWorktrees = new Set<string>();
-/** The Checkout menu of a New task in another computer's project: its folder there, or a new worktree. */
+/** The branch such a worktree starts from, when one was chosen (else the host's default). */
+const remoteBranches = new Map<string, string>();
+/** The Checkout menu of a New task in another computer's project: its folder there, or a new worktree from a branch. */
 async function showRemoteCheckout(anchor: HTMLElement): Promise<void> {
   const task = session(), remote = task && projectRemote(task.projectId);
   if (!task || !remote || task.remoteDevice || !newTaskView()) return;
-  const worktree = remoteWorktrees.has(task.id);
+  const worktree = remoteWorktrees.has(task.id), branch = remoteBranches.get(task.id);
   await showChoices(anchor, { title: 'Runs in', width: 300, items: [
-    { id: 'local', label: 'Project folder', description: `The project’s own checkout on ${remote.name}`, icon: 'folder', selected: !worktree },
+    { id: 'local', label: 'Project folder', description: `The project’s own checkout on ${remote.name}, as it is`, icon: 'folder', selected: !worktree },
     { id: 'worktree', label: 'New worktree', description: `An isolated branch on ${remote.name}, so its folder stays as it is`, icon: 'worktree', selected: worktree },
+    ...worktree ? [{ id: 'branch', label: `From ${branch ?? 'the default branch'}`, description: `The branch on ${remote.name} the worktree starts from`, icon: 'branch', separator: true }] : [],
   ], onSelect: id => {
     closeChoiceMenu();
+    if (id === 'branch') { run(showRemoteBranches(anchor, task, remote)); return; }
     if (id === 'worktree') remoteWorktrees.add(task.id); else remoteWorktrees.delete(task.id);
     if (session()?.id === task.id) renderComposer();
   } });
+}
+/** The branches of a remote project's checkout there (`remote_project_branches`), for its New worktree. */
+async function showRemoteBranches(anchor: HTMLElement, task: Session, remote: { id: string; name: string }): Promise<void> {
+  anchor.setAttribute('aria-busy', 'true');
+  let list: { current: string; branches: string[]; defaultBranch: string };
+  try { list = await call<typeof list>('remote_project_branches', { projectId: task.projectId }); }
+  finally { anchor.removeAttribute('aria-busy'); }
+  if (session()?.id !== task.id || !anchor.isConnected) return;
+  const chosen = remoteBranches.get(task.id);
+  const names = [...new Set([list.defaultBranch, list.current, ...list.branches].filter(Boolean))];
+  await showChoices(anchor, { title: `Branches on ${remote.name}`, searchPlaceholder: 'Search branches…', width: 300, items: [
+    { id: '', label: 'Default branch', description: list.defaultBranch ? `${list.defaultBranch}, from origin when it has one` : 'The repository’s main branch', icon: 'branch', selected: !chosen },
+    ...names.map(name => ({ id: `branch:${name}`, label: name, description: name === list.current ? 'Checked out there' : undefined, icon: 'branch', selected: chosen === name })),
+  ], onSelect: id => {
+    closeChoiceMenu();
+    if (id.startsWith('branch:')) remoteBranches.set(task.id, id.slice('branch:'.length)); else remoteBranches.delete(task.id);
+    if (session()?.id === task.id) renderComposer();
+  } });
+}
+/** The computer a file context's files are on when it is not this one: a task running there, or its project's. */
+function contextRemote(context: { projectId: string; sessionId?: string }): string | undefined {
+  const task = context.sessionId ? state.sessions.find(item => item.id === context.sessionId) : undefined;
+  return task?.remoteDevice?.name ?? projectRemote(context.projectId)?.name;
 }
 /** Where a project is, as menus show it: its folder, or the computer it is on (and whether that is reachable). */
 function projectWhere(p: Project): string {
@@ -7645,7 +7678,7 @@ async function sendRemote(s: Session, target: RemoteTarget, draft: string, text:
     const started = await trackRemoteStart(s.id, target, startId => call<{ sessionId: string; note?: string }>('remote_start_task', {
       // The empty New task draft becomes the mirror, so no stray draft is left behind.
       sessionId: s.id, deviceId: target.deviceId, projectId: s.projectId, prompt: content, provider: s.provider, model: s.model, mode: s.mode,
-      effort: s.reasoningEffort ?? null, worktree: Boolean(s.worktreePath) || (Boolean(projectRemote(s.projectId)) && remoteWorktrees.has(s.id)), branch: s.worktreeBranch || state.git?.branch || check.branch || null, startId, imageIds,
+      effort: s.reasoningEffort ?? null, worktree: Boolean(s.worktreePath) || (Boolean(projectRemote(s.projectId)) && remoteWorktrees.has(s.id)), branch: (projectRemote(s.projectId) && remoteWorktrees.has(s.id) ? remoteBranches.get(s.id) : undefined) || s.worktreeBranch || state.git?.branch || check.branch || null, startId, imageIds,
     }), undefined, onStage).catch((error: unknown) => { if (!remoteStartCancels.has(s.id)) console.error(error); return undefined; });
     accepted = Boolean(started);
     if (!started || started.sessionId !== s.id) {

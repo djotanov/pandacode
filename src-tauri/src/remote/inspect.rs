@@ -131,6 +131,29 @@ pub(crate) async fn read_file(app: &tauri::AppHandle, state: &AppState, session:
     Ok(Some(text))
 }
 
+/// The stamp of a file a mirror shows: fixed, so its tab reads the file from the host once when
+/// opened and is never re-read every few seconds over the relay. None for a local task.
+pub(crate) const REMOTE_STAMP: &str = "remote";
+pub(crate) fn stamp(state: &AppState, session: Option<&str>) -> Result<Option<String>> {
+    Ok(host_of(state, session)?.map(|_| REMOTE_STAMP.to_owned()))
+}
+
+/// File @-mentions use the task's checkout on its host, including its worktree. Before a
+/// remote task exists, search the host project by id. Mentions are paths the agent reads there.
+pub(crate) async fn search_files(app: &tauri::AppHandle, state: &AppState, project_id: &str, session: Option<&str>, query: &str, limit: Option<usize>) -> Result<Option<Vec<workspace::FileEntry>>> {
+    let (device, params) = if let Some(host) = host_of(state, session)? {
+        (host.device, json!({"sessionId": host.session, "query": query}))
+    } else {
+        let project = state.store.lock().map_err(|e| e.to_string())?.project_entry(project_id)?;
+        let (Some(device), Some(remote_project)) = (project.remote_device, project.remote_project) else { return Ok(None) };
+        (device.id, json!({"projectId": remote_project, "query": query}))
+    };
+    let reply = client::call(app, &device, "files.search", params).await?;
+    let mut entries = entries_from(&reply);
+    entries.truncate(limit.unwrap_or(usize::MAX));
+    Ok(Some(entries))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

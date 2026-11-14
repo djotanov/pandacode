@@ -1591,6 +1591,13 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
     return (w.__remoteStartBusy ? { sessionId: s.id, note: w.__remoteStartBusy } : { sessionId: s.id }) as T;
   }
   if (command === 'remote_browsed') return [...browsedComputers] as T;
+  if (command === 'remote_project_branches') {
+    // A remote project's branches there (`git.branches` by project); `__remoteBranchesFail` is the host's refusal.
+    const w = window as any;
+    if (w.__remoteBranchesFail) { const failure = w.__remoteBranchesFail; w.__remoteBranchesFail = undefined; throw new Error(failure); }
+    if (!projects.find(item => item.id === args.projectId)?.remoteDevice) throw new Error('That project is on this computer.');
+    return { current: 'feat/upload-retry', branches: ['main', 'feat/upload-retry', 'release/2.4'], defaultBranch: 'main' } as T;
+  }
   if (command === 'remote_browse') {
     // Another computer's projects and tasks shown here (remote/browse.rs). Tests: `__remoteBrowses`
     // records each call, `__remoteBrowseFail` is an error text for the next show.
@@ -2068,6 +2075,8 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
     case 'pin_session': {
       const task = session(args.sessionId);
       if (typeof args.pinned !== 'boolean') throw new Error('Choose whether to pin this task.');
+      // A task on another computer is pinned there too (`thread.pin`); `__remoteChanges` records it.
+      if (task.remoteDevice) ((window as any).__remoteChanges ??= []).push({ method: 'thread.pin', sessionId: task.id, pinned: args.pinned });
       saveThreadOrder(sessions.map(item => ({ ...threadOrder(item), ...(item.id === task.id ? { pinned: args.pinned } : {}) })));
       emit('sessions-changed', undefined);
       result = task; break;
@@ -2182,6 +2191,8 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
     }
     case 'update_session': {
       const s = session(args.sessionId);
+      // Renaming a task on another computer renames it there too (`thread.rename`).
+      if (s.remoteDevice && typeof args.title === 'string') ((window as any).__remoteChanges ??= []).push({ method: 'thread.rename', sessionId: s.id, title: args.title });
       if (args.archived === false && s.archived && s.taskStage === 'completed') s.completedAt = Date.now();
       Object.assign(s, Object.fromEntries(Object.entries(args).filter(([key]) => key !== 'sessionId')), { updatedAt: Date.now() }); break;
     }
@@ -2487,6 +2498,8 @@ export async function invoke<T>(command: string, args: Record<string, any>): Pro
     case 'simulator_capture': result = await previewSimulator.capture(args.udid); break;
     case 'list_files': result = previewExplorer.list(args); break;
     case 'search_files': {
+      // Another computer's project is searched there (`files.search`, remote/inspect.rs); `__remoteSearches` records it.
+      if (projects.find(item => item.id === args.projectId)?.remoteDevice) ((window as any).__remoteSearches ??= []).push({ projectId: args.projectId, query: args.query });
       const query = String(args.query ?? '').trim().toLocaleLowerCase().replace(/\/$/, '');
       const files = previewWorkspaceFiles.map(path => ({ path, isDir: false }));
       // Folders join typed queries only, like the native index.

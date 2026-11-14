@@ -97,7 +97,7 @@ of shown computers is `browsed` in `remote.json`.
   tasks run there."), so the model picker, offline note and start progress are the mirror ones.
   Before its task exists there, the inspector says where the project is without any git or file
   call; the branch menu is not offered (the checkout icon is a Runs in menu instead: Project
-  folder, or New worktree, sent as `worktree: true`; `remoteWorktrees` in `main.ts`), and menus show the project as "On <computer>". A send
+  folder, or New worktree, sent as `worktree: true`; with New worktree selected, From branch opens a searchable list from `remote_project_branches` / `git.branches { projectId }`. Project folder keeps the checkout as it is; `remoteWorktrees` / `remoteBranches` in `main.ts`), and menus show the project as "On <computer>". A send
   that would run such a task here (a board task, say) is refused.
 
 - **Sidebar.** With another computer's projects shown, the project filter also lists
@@ -109,11 +109,18 @@ of shown computers is `browsed` in `remote.json`.
   projects in menus (`On <computer> · Offline`); one missing from presence is not marked.
 - **Open project.** A computer being shown has Refresh (lists it again now; the dialog stays)
   and Stop showing; while a computer is asked, its row is `aria-busy` and says so.
+- **Rename and pin.** `update_session` and `pin_session` send `thread.rename` and `thread.pin` to the host before changing the mirror. A refusal leaves the copy unchanged. Offline changes affect only this copy and are not queued.
 - **Settle and reopen.** Changing a mirror's stage (`set_task_stage`) sends `thread.setStage` to
   its host first (`mirror::set_stage`), so a task settled here is settled there; the host's
   refusal is shown and nothing changes, and a host that is offline changes only this copy.
 
 ## Remote inspector
+
+File @-mentions use `files.search` on the host: the task's checkout (including its worktree)
+for an existing mirror, or the project folder for a New task. Remote file tabs say
+"Read only · on <computer>" and offer no editor, save or attach action. The explorer only
+copies relative paths. File stamps are fixed so polling does not re-read files over the relay;
+close and reopen a file to read it again.
 
 The Changes and Files views of a mirror (any task that runs on another computer, in a remote
 project or not) show its host's checkout, for review only (`src-tauri/src/remote/inspect.rs`).
@@ -1273,7 +1280,7 @@ paged replies take `offset` and answer `next`.
 | `usage.get` | view | RO | `sessionId?, refresh?` (token ledger) |
 | `usage.limits` | view | RO | `provider, refresh?`; `refresh` (asks the provider) needs control |
 | `usage.resumeAtReset` / `usage.clearLimit` | control | O | `sessionId, on` / `sessionId`. Resuming (`on: true`) or clearing a team lead's limit needs Full access for remote tasks. |
-| `git.status` / `git.branches` / `worktree.status` | view | RO | `sessionId`. Staged renames and copies carry `origPath`. |
+| `git.status` / `git.branches` / `worktree.status` | view | RO | `sessionId`; `git.branches` also accepts `projectId` (without a session) on `projectCheckout` hosts. Staged renames and copies carry `origPath`. |
 | `git.stage` | control | O | `sessionId, paths \| all, unstage?` → `{ count, skipped? }` for `all`. Named paths: up to 5,000; `all`: up to 50,000 files, folder and submodule rows skipped and counted, run over pathspec chunks. Refused while a background git call holds the checkout (`Another git change is still running on this checkout.`). `unstage` of a staged rename or copy is `origPath`-aware: unstaging its `path` also restores its `origPath` in the index, so the old name does not stay staged as a deletion. |
 | `git.discard` | control | O | `sessionId, paths, skipFolders?` (1–500 files) → `{ count, skipped? }`. With `skipFolders` (Discard all) folder and submodule rows are left out and counted in `skipped`; without it a named folder is refused. Git runs over 8 KiB pathspec chunks. Restores tracked files from HEAD and deletes only the untracked files it names; discarding a rename's new path also restores the old one; refused while any agent works in the checkout or another git change holds it; `allow_task_mode`; change gate; idempotent. |
 | `git.commit` | full | B | `sessionId, message, push?, sendId?`. Refused while the task's agent runs. Hooks run only with Full access for remote tasks on. |
@@ -1697,6 +1704,7 @@ GitHub CLI work while the inspected task state is unchanged.
 | `list_providers` | `{ force?, deviceId? }` | as without `deviceId`, from that host (see Model lists) |
 | `list_provider_models` | `{ provider, force?, deviceId? }` | as without `deviceId`, from that host |
 | `remote_start_task` | `{ deviceId, projectId, prompt, provider, model, mode?, effort?, worktree?, branch?, sessionId? }` | the mirror `Session` plus `sessionId`. `branch` defaults to the checkout's. An empty New task draft without its own worktree passed as `sessionId` becomes the mirror; otherwise a new task is made. On failure nothing is left: a new row is deleted, a draft stays a draft. With `startId`, a timeout or a dropped socket keeps the row and returns it (see Starting a task). |
+| `remote_project_branches` | `{ projectId }` | `{ current, branches, defaultBranch }` from the remote project’s host. Older hosts are refused with an update message. |
 | `remote_browse` | `{ deviceId, show }` | `{ projects, tasks }` now shown from that computer. `show: true` lists it at once (an offline or non-hosting computer is refused) and keeps it shown; `false` removes its remote projects and their copies. See Remote projects. |
 | `remote_browsed` | | `[deviceId]`: the computers shown here |
 | `remote_cancel_start` | `{ sessionId }` (the local row) | `{ cancelled }`. Cancels a start that has no host task yet and puts the row back (also when the host can't be reached); `cancelled: false` when the host had already made the task, which then runs as a mirror. |

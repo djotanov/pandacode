@@ -39,6 +39,8 @@ export type WorktreeHost = {
   computer(session: Session, fresh: boolean): string;
   /** A New task in another computer's project (remote/browse.rs) starts in a new worktree there. */
   remoteWorktree?(session: Session): boolean;
+  /** The branch that worktree starts from, when one was chosen. */
+  remoteBranch?(session: Session): string | undefined;
   onExtra(id: string, session: Session, anchor: HTMLElement): Promise<void> | void;
 };
 export type CleanupIntent = 'complete' | 'remove';
@@ -87,7 +89,8 @@ export function createWorktrees(host: WorktreeHost) {
     // A New task in another computer's project: its checkout is chosen here and made there.
     const remote = fresh && !session.remoteDevice ? project?.remoteDevice : undefined;
     if (remote) {
-      const worktree = Boolean(host.remoteWorktree?.(session)), label = worktree ? `New worktree on ${remote.name}` : `Project folder on ${remote.name}`;
+      const worktree = Boolean(host.remoteWorktree?.(session)), from = worktree ? host.remoteBranch?.(session) : undefined;
+      const label = worktree ? `New worktree${from ? ` from ${from}` : ''} on ${remote.name}` : `Project folder on ${remote.name}`;
       const checkout = `<button type="button" id="remote-checkout" class="composer-local" data-checkout="${worktree ? 'worktree' : 'local'}" data-action="remote-checkout" aria-haspopup="menu" aria-expanded="false" aria-label="${escape(`Checkout: ${label}`)}" data-tip="${escape(`Runs in: ${label}`)}">${icon(worktree ? 'worktree' : 'folder')}<span class="sr-only">${escape(label)}</span></button>`;
       return `<div class="composer-context">${host.computer(session, fresh)}${checkout}${links}</div>`;
     }

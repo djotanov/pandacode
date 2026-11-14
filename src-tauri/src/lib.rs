@@ -867,6 +867,8 @@ async fn prompt_activity(state: State<'_, AppState>) -> Result<Vec<(i64, String,
 }
 #[tauri::command]
 async fn pin_session(app: tauri::AppHandle, state: State<'_, AppState>, session_id: String, pinned: bool) -> Result<Session> {
+    // A task on another computer is pinned there too.
+    remote::mirror::change_on_host(&app, &state, &session_id, "thread.pin", serde_json::json!({"pinned": pinned})).await?;
     let task = state.store.lock().map_err(|e| e.to_string())?.pin_session(&session_id, pinned)?;
     let _ = app.emit("sessions-changed", ());
     Ok(task)
@@ -1082,7 +1084,10 @@ async fn update_session(
             .lock()
             .map_err(|e| e.to_string())?
             .session(&session_id)?;
-        if task.provider == "codex" {
+        // A task on another computer is renamed there too; its harness's own name is the host's.
+        if task.remote_device.is_some() {
+            remote::mirror::change_on_host(&app, &state, &session_id, "thread.rename", serde_json::json!({"title": title})).await?;
+        } else if task.provider == "codex" {
             return task_controls::rename_task(&state, &session_id, title).await;
         }
     }
@@ -3828,6 +3833,10 @@ async fn write_workspace_file(
 async fn workspace_file_stamp(
     state: State<'_, AppState>, project_id: String, session_id: Option<String>, path: String,
 ) -> Result<String> {
+    // A task on another computer: its files are read from there once (remote/inspect.rs).
+    if let Some(stamp) = remote::inspect::stamp(&state, session_id.as_deref())? {
+        return Ok(stamp);
+    }
     let root = state.root(&project_id, session_id.as_deref())?;
     blocking(move || workspace::file_stamp(&root, &path)).await
 }
@@ -3847,17 +3856,18 @@ async fn list_files(
 }
 #[tauri::command]
 async fn search_files(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     project_id: String,
     session_id: Option<String>,
     query: String,
     limit: Option<usize>,
 ) -> Result<Vec<workspace::FileEntry>> {
-    let mirror = match session_id.as_deref() {
-        Some(id) => state.store.lock().map_err(|e| e.to_string())?.session(id)?.remote_device.is_some(),
-        None => false,
-    };
-    let root = state.root(&project_id, if mirror { None } else { session_id.as_deref() })?;
+    // Another computer's project: its files, from there.
+    if let Some(entries) = remote::inspect::search_files(&app, &state, &project_id, session_id.as_deref(), &query, limit).await? {
+        return Ok(entries);
+    }
+    let root = state.root(&project_id, session_id.as_deref())?;
     blocking(move || workspace::search_files(&root, query, limit)).await
 }
 #[tauri::command]
@@ -4702,6 +4712,7 @@ pub fn run() {
                 remote::mirror::remote_repo_check,
                 remote::browse::remote_browse,
                 remote::browse::remote_browsed,
+                remote::browse::remote_project_branches,
                 provider_settings::provider_configuration,
                 connections::connections_list,
                 connections::connection_save,
